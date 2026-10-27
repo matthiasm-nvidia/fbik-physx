@@ -1,4 +1,5 @@
 #include "PhysicsSimulation.h"
+#include "Camera.h"
 #include <ovstage/ovstage_config.h>
 #include <cmath>
 #include <filesystem>
@@ -17,6 +18,19 @@ int main(int argc, char **argv)
     try
     {
         require(argc == 2, "Expected project root");
+        viewer::Camera camera;
+        camera.init();
+        camera.look_at({0, 0, 6}, {0, 0, 0});
+        const auto centerRay = camera.screenRay(400, 300, 800, 600);
+        require((centerRay.direction - camera.forward).magnitude() < 1e-6f, "Perspective center ray mismatch");
+        const auto corner = camera.screenRay(800, 0, 800, 600);
+        require(corner.direction.dot(camera.right) > 0 && corner.direction.dot(camera.up) > 0, "Picking axes inverted");
+        camera.orthographic = true;
+        camera.orthographicHeight = 6;
+        const auto ortho = camera.screenRay(800, 0, 800, 600);
+        require((ortho.direction - camera.forward).magnitude() < 1e-6f &&
+                std::abs((ortho.origin-camera.pos).dot(camera.right)-4) < 1e-6f &&
+                std::abs((ortho.origin-camera.pos).dot(camera.up)-3) < 1e-6f, "Orthographic picking ray mismatch");
         const auto root = std::filesystem::absolute(argv[1]);
         const auto binaries = (root / "deps/ovstage/bin").u8string();
         auto entry = ovstage_config_entry_binary_package_root_path(viewer::stage::str(binaries.c_str()));
@@ -69,6 +83,34 @@ int main(int argc, char **argv)
             for (const auto &[path, prim] : initial)
                 for (const auto &[name, value] : prim)
                     require(restored.at(path).at(name).numbers == value.numbers, "Stop did not restore original transform");
+        }
+        {
+            viewer::PhysicsSimulation simulation(stage, ordinal);
+            for (int i = 0; i < 180; ++i) simulation.step(ordinal);
+            require(!simulation.beginDrag({5, 3, 0}, {0, -1, 0}, ordinal), "Static ground was draggable");
+            require(!simulation.beginDrag({20, 3, 0}, {0, 1, 0}, ordinal), "Empty ray picked a body");
+            require(simulation.beginDrag({0, 0.5f, 6}, {0, 0, -1}, ordinal), "Could not pick resting box");
+            simulation.moveDrag({0, -3, 6}, {0, 0, -1}, ordinal);
+            for (int i = 0; i < 60; ++i) simulation.step(ordinal);
+            require(pose().at("/World/Box").at("omni:fabric:worldMatrix").numbers[13] > 0.3,
+                    "Dragging bypassed ground collision");
+            simulation.moveDrag({0, 3.5f, 6}, {0, 0, -1}, ordinal);
+            for (int i = 0; i < 180; ++i) simulation.step(ordinal);
+            const auto raised = pose().at("/World/Box").at("omni:fabric:worldMatrix").numbers;
+            std::cout << "Dragged height: " << raised[13] << '\n';
+            require(raised[13] > 2, "Mouse joint did not lift the box");
+            simulation.endDrag(ordinal);
+            require(!simulation.dragging(), "Release did not end drag");
+            for (int i = 0; i < 180; ++i) simulation.step(ordinal);
+            require(pose().at("/World/Box").at("omni:fabric:worldMatrix").numbers[13] < 0.9, "Released box stayed pinned");
+            const auto resting = pose().at("/World/Box").at("omni:fabric:worldMatrix").numbers;
+            require(simulation.beginDrag({float(resting[12]), float(resting[13]), 6}, {0, 0, -1}, ordinal), "Second grab failed");
+            simulation.stop(ordinal);
+            const auto prims = viewer::stage::read(stage, ordinal, {"usd-prim-type"});
+            require(!prims.count("/__FbikMouseJoint"), "Stop retained temporary USD joint");
+            require(!simulation.dragging(), "Stop retained mouse joint");
+            require(pose().at("/World/Box").at("omni:xform").numbers == initial.at("/World/Box").at("omni:xform").numbers,
+                    "Stop after dragging did not restore pose");
         }
         viewer::stage::check(ovstage_destroy_instance(stage));
         stage = nullptr;

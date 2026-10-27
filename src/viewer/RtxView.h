@@ -23,6 +23,10 @@ class RtxView
     void stopSimulation();
     void stepSimulation();
     bool simulating() const;
+    bool beginDrag(const Camera::Ray &ray);
+    void moveDrag(const Camera::Ray &ray);
+    void endDrag();
+    bool dragging() const;
     bool loaded() const;
     const std::vector<uint8_t> &pixels() const;
     int width() const;

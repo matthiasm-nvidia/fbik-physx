@@ -138,3 +138,15 @@ void Camera::handle_wheel(float rotation)
 }
 
 } // namespace viewer
+
+viewer::Camera::Ray viewer::Camera::screenRay(float x, float y, float width, float height) const
+{
+    if (width <= 0 || height <= 0) return {pos, forward};
+    const float sx = (2*x/width - 1)*width/height + 2*horizontalOffset;
+    const float sy = 1 - 2*y/height + 2*verticalOffset;
+    if (orthographic)
+        return {pos + (right*sx + up*sy)*(orthographicHeight*0.5f), forward};
+    Vec3 direction = forward + (right*sx + up*sy)*std::tan(fov*3.14159265f/360);
+    direction.normalize();
+    return {pos, direction};
+}

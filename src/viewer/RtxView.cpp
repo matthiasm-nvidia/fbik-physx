@@ -646,6 +646,7 @@ void RtxView::stopSimulation()
     {
         impl->scene->physics->stop(impl->scene->ordinal);
         impl->scene->physics.reset();
+        impl->lastLens = {}; // Removing the temporary joint layer can refresh viewer attributes.
 
     }
 }
@@ -656,6 +657,26 @@ void RtxView::stepSimulation()
 bool RtxView::simulating() const
 {
     return impl->scene && bool(impl->scene->physics);
+}
+
+bool RtxView::beginDrag(const Camera::Ray &ray)
+{
+    if (!simulating()) return false;
+    // Reference population may refresh camera/product attributes from their USD layer.
+    impl->lastLens = {};
+    return impl->scene->physics->beginDrag(ray.origin, ray.direction, impl->scene->ordinal);
+}
+void RtxView::moveDrag(const Camera::Ray &ray)
+{
+    if (simulating()) impl->scene->physics->moveDrag(ray.origin, ray.direction, impl->scene->ordinal);
+}
+void RtxView::endDrag()
+{
+    if (simulating()) impl->scene->physics->endDrag(impl->scene->ordinal);
+}
+bool RtxView::dragging() const
+{
+    return simulating() && impl->scene->physics->dragging();
 }
 
 bool RtxView::loaded() const

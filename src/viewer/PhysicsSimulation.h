@@ -1,5 +1,6 @@
 #pragma once
 #include "StageData.h"
+#include "CameraMath.h"
 #include <memory>
 
 namespace viewer
@@ -23,6 +24,10 @@ class PhysicsSimulation
     PhysicsSimulation &operator=(const PhysicsSimulation &) = delete;
     void step(ovstage_ordinal_t &ordinal);
     void stop(ovstage_ordinal_t &ordinal);
+    bool beginDrag(Vec3 origin, Vec3 direction, ovstage_ordinal_t &ordinal);
+    void moveDrag(Vec3 origin, Vec3 direction, ovstage_ordinal_t &ordinal);
+    void endDrag(ovstage_ordinal_t &ordinal);
+    bool dragging() const;
     static constexpr float timeStep = 1.0f / 60.0f;
 
   private:

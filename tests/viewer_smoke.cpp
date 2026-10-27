@@ -92,6 +92,7 @@ int main(int argc, char **argv)
                 return sum / count;
             };
             const auto startY = boxHeightInImage();
+            require(!rtx.beginDrag({{0, 4, 6}, {0, 0, -1}}), "Picking was enabled while stopped");
             rtx.startSimulation();
             require(rtx.simulating(), "Start did not enter simulation");
             for (int i = 0; i < 180; ++i)
@@ -103,12 +104,26 @@ int main(int argc, char **argv)
             require(std::abs(endY - startY) > 30, "RTX did not show the falling box motion");
             camera.pos.x += 0.01f; // Camera hierarchy updates must preserve the simulated pose.
             require(std::abs(boxHeightInImage() - endY) < 3, "Camera movement reset simulated geometry");
+            require(rtx.beginDrag({{0, 0.5f, 6}, {0, 0, -1}}), "RTX stage box could not be picked");
+            rtx.moveDrag({{0, 3.5f, 6}, {0, 0, -1}});
+            for (int i = 0; i < 120; ++i)
+            {
+                rtx.stepSimulation();
+                if (i % 10 == 0) rtx.render(camera, 640, 480);
+            }
+            require(std::abs(boxHeightInImage() - endY) > 30, "RTX did not display mouse-joint motion");
+            rtx.endDrag();
+            require(!rtx.dragging(), "Mouse release retained joint");
+            for (int i = 0; i < 180; ++i) rtx.stepSimulation();
+            require(std::abs(boxHeightInImage() - endY) < 15, "Released box did not return to floor");
             rtx.stopSimulation();
             require(!rtx.simulating(), "Stop did not leave simulation");
             require(std::abs(boxHeightInImage() - startY) < 3, "RTX did not show restored pose");
             rtx.startSimulation();
             rtx.stepSimulation();
+            require(rtx.beginDrag({{0, 4, 6}, {0, 0, -1}}), "Grab before scene replacement failed");
             rtx.load(file, 640, 480);
+            require(!rtx.dragging(), "Scene replacement retained drag state");
             require(!rtx.simulating(), "Loading a new stage retained the old simulation");
             glViewport(0, 0, 640, 480);
             glClear(GL_COLOR_BUFFER_BIT);

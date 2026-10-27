@@ -5,6 +5,10 @@
 #include <cmath>
 #include <functional>
 #include <stdexcept>
+#include <sstream>
+#include <iomanip>
+#include <locale>
+#include <set>
 
 namespace viewer
 {
@@ -73,7 +77,25 @@ Matrix inverse(Matrix a)
     }
     return result;
 }
-void writeLocal(ovstage_instance_t *s, ovstage_ordinal_t ordinal, const std::string &path, Matrix value)
+void populationWait(ovstage_instance_t *s, ovstage_population_enqueue_result_t op)
+{
+    stage::check(op.status);
+    ovstage_population_op_wait_result_t result{};
+    stage::check(ovstage_population_wait_op(s, op.op_index, OVSTAGE_TIMEOUT_INFINITE, &result));
+    if (result.error_op_id_count)
+    {
+        const auto error = ovstage_population_get_last_op_error(result.error_op_ids[0]);
+        throw std::runtime_error(std::string(error.ptr, error.length));
+    }
+}
+Vec3 normalized(Vec3 value)
+{
+    const auto length = value.magnitude();
+    if (!std::isfinite(length) || length < 1e-8f)
+        throw std::runtime_error("Invalid picking ray.");
+    return value / length;
+}
+void writeAttribute(ovstage_instance_t *s, ovstage_ordinal_t ordinal, const std::string &path, const char *name, void *value, DLDataType dtype, ovstage_attribute_semantic_t semantic)
 {
     ovx_string_t pathValue = stage::str(path.c_str());
     ovstage_predicate_t predicate{};
@@ -88,21 +110,25 @@ void writeLocal(ovstage_instance_t *s, ovstage_ordinal_t ordinal, const std::str
     {
         int64_t shape = 1;
         DLTensor tensor{};
-        tensor.data = value.data();
+        tensor.data = value;
         tensor.device = {kDLCPU, 0};
         tensor.ndim = 1;
         tensor.shape = &shape;
-        tensor.dtype = {kDLFloat, 64, 16};
+        tensor.dtype = dtype;
         ovstage_write_data_t data{};
         data.tensors = &tensor;
         data.tensor_count = 1;
-        data.semantic = OVSTAGE_SEMANTIC_MATRIX;
+        data.semantic = semantic;
         ovx_string_or_token_t attribute{};
-        attribute.string = stage::str("omni:xform");
+        attribute.string = stage::str(name);
         stage::wait(s, ovstage_write_attribute(s, query, attribute, ordinal, data, OVSTAGE_PRIM_MODE_UPSERT));
     }
     catch (...) { ovstage_release_query(s, query); throw; }
     ovstage_release_query(s, query);
+}
+void writeLocal(ovstage_instance_t *s, ovstage_ordinal_t ordinal, const std::string &path, Matrix value)
+{
+    writeAttribute(s, ordinal, path, "omni:xform", value.data(), {kDLFloat, 64, 16}, OVSTAGE_SEMANTIC_MATRIX);
 }
 } // namespace
 
@@ -127,6 +153,19 @@ struct PhysicsSimulation::Impl
     std::unique_ptr<ovphysx::utils::OvStageOutputCache> cache;
     std::map<std::string, Matrix> initial;
     std::map<std::string, Matrix> childLocals;
+    std::set<std::string> kinematic;
+    std::string jointPath;
+    ovstage_population_usd_reference_handle_t jointLayer{};
+    bool hasJointLayer = false, activeDrag = false, stepped = false;
+    float dragDepth = 0;
+    Vec3 target{0, 0, 0};
+    void drain(ovstage_ordinal_t ordinal)
+    {
+        stage::seal(stage, ordinal);
+        ovstage_ordinal_range_t range{};
+        range.end_ordinal = ordinal; // Single input batch; never includes physics output.
+        check(ovphysx_update_from_ovstage(handle, range));
+    }
     explicit Impl(ovstage_instance_t *s) : stage(s) {}
     void destroy()
     {
@@ -143,10 +182,15 @@ struct PhysicsSimulation::Impl
 
 PhysicsSimulation::PhysicsSimulation(ovstage_instance_t *s, ovstage_ordinal_t ordinal) : impl(std::make_unique<Impl>(s))
 {
-    const auto snapshot = stage::read(s, ordinal, {"omni:xform", "physics:rigidBodyEnabled"});
+    const auto snapshot = stage::read(s, ordinal, {"omni:xform", "physics:rigidBodyEnabled", "physics:kinematicEnabled"});
     for (const auto &[path, prim] : snapshot)
         if (flag(prim, "physics:rigidBodyEnabled"))
             impl->initial.emplace(path, matrix(prim, "omni:xform"));
+    for (const auto &[path, prim] : snapshot)
+        if (flag(prim, "physics:kinematicEnabled")) impl->kinematic.insert(path);
+    impl->jointPath = "/__FbikMouseJoint";
+    const auto prims = stage::read(s, ordinal, {"usd-prim-type"});
+    while (prims.count(impl->jointPath)) impl->jointPath += "_";
     // The renderer may reconcile local child transforms from world-matrix edits.
     // Keep authored rigid attachments under our ownership for the duration of a run.
     for (const auto &[path, prim] : snapshot)
@@ -166,6 +210,7 @@ PhysicsSimulation::~PhysicsSimulation() = default;
 void PhysicsSimulation::step(ovstage_ordinal_t &ordinal)
 {
     check(ovphysx_step_sync(impl->handle, timeStep));
+    impl->stepped = true;
     const auto output = ovphysx::utils::writeWorldTransformsToOvstage(impl->handle, impl->stage, ++ordinal, impl->cache.get());
     // Even partial output must be sealed before recovery writes.
     stage::seal(impl->stage, ordinal);
@@ -208,6 +253,14 @@ void PhysicsSimulation::step(ovstage_ordinal_t &ordinal)
 void PhysicsSimulation::stop(ovstage_ordinal_t &ordinal)
 {
     impl->destroy();
+    impl->activeDrag = false;
+    if (impl->hasJointLayer)
+    {
+        populationWait(impl->stage, ovstage_population_remove_usd_reference(impl->stage, impl->jointLayer));
+        impl->hasJointLayer = false;
+        populationWait(impl->stage, ovstage_population_apply_usd_changes(impl->stage, ++ordinal));
+        stage::seal(impl->stage, ordinal);
+    }
     ++ordinal;
     for (const auto &[path, initial] : impl->initial)
         writeLocal(impl->stage, ordinal, path, initial);
@@ -216,4 +269,83 @@ void PhysicsSimulation::stop(ovstage_ordinal_t &ordinal)
     stage::seal(impl->stage, ordinal);
     stage::hierarchy(impl->stage, ordinal);
 }
+
+bool PhysicsSimulation::beginDrag(Vec3 origin, Vec3 direction, ovstage_ordinal_t &ordinal)
+{
+    endDrag(ordinal);
+    if (!impl->stepped) return false; // Scene-query objects exist after the first completed step.
+    direction = normalized(direction);
+    if (!std::isfinite(origin.x) || !std::isfinite(origin.y) || !std::isfinite(origin.z))
+        throw std::runtime_error("Invalid picking ray origin.");
+    const float from[] = {origin.x, origin.y, origin.z}, ray[] = {direction.x, direction.y, direction.z};
+    const ovphysx_scene_query_hit_t *hits = nullptr;
+    uint32_t count = 0;
+    check(ovphysx_raycast(impl->handle, from, ray, 1e8f, false, OVPHYSX_SCENE_QUERY_MODE_CLOSEST, &hits, &count));
+    if (!count) return false;
+    const auto hit = hits[0];
+    ovphysx_string_t path{};
+    check(ovphysx_scene_query_get_paths_from_ids(impl->handle, &hit.rigid_body, 1, &path, 1, &count));
+    const std::string body(path.ptr ? path.ptr : "", path.length);
+    if (!impl->initial.count(body) || impl->kinematic.count(body) || hit.proto_index != 0xffffffffu) return false;
+    const auto snapshot = stage::read(impl->stage, ordinal, {"omni:fabric:worldMatrix"});
+    const auto inv = inverse(matrix(snapshot.at(body), "omni:fabric:worldMatrix"));
+    float local[3]{};
+    for (int c = 0; c < 3; ++c)
+        local[c] = float(hit.position[0]*inv[c] + hit.position[1]*inv[4+c] + hit.position[2]*inv[8+c] + inv[12+c]);
+    if (impl->hasJointLayer)
+    {
+        populationWait(impl->stage, ovstage_population_remove_usd_reference(impl->stage, impl->jointLayer));
+        impl->hasJointLayer = false;
+        populationWait(impl->stage, ovstage_population_apply_usd_changes(impl->stage, ++ordinal));
+        impl->drain(ordinal);
+    }
+    std::ostringstream usd;
+    usd.imbue(std::locale::classic());
+    usd << std::setprecision(9) << "#usda 1.0\ndef PhysicsJoint \"" << impl->jointPath.substr(1)
+        << "\" (prepend apiSchemas = [\"PhysicsDriveAPI:transX\", \"PhysicsDriveAPI:transY\", \"PhysicsDriveAPI:transZ\"])\n{\n"
+        << "rel physics:body1 = <" << body << ">\n"
+        << "point3f physics:localPos0 = (" << hit.position[0] << "," << hit.position[1] << "," << hit.position[2] << ")\n"
+        << "point3f physics:localPos1 = (" << local[0] << "," << local[1] << "," << local[2] << ")\n"
+        << "bool physics:jointEnabled = true\nbool physics:excludeFromArticulation = true\n";
+    for (const char *axis : {"transX", "transY", "transZ"})
+        usd << "uniform token drive:" << axis << ":physics:type = \"acceleration\"\n"
+            << "float drive:" << axis << ":physics:stiffness = 400\n"
+            << "float drive:" << axis << ":physics:damping = 40\n"
+            << "float drive:" << axis << ":physics:maxForce = 1000\n"
+            << "float drive:" << axis << ":physics:targetPosition = 0\n";
+    usd << "}\n";
+    const auto content = usd.str();
+    populationWait(impl->stage, ovstage_population_add_usd_reference_from_string(impl->stage,
+        stage::str(content.c_str()), stage::str("/"), &impl->jointLayer));
+    impl->hasJointLayer = true;
+    populationWait(impl->stage, ovstage_population_apply_usd_changes(impl->stage, ++ordinal));
+    impl->drain(ordinal);
+    impl->dragDepth = hit.distance;
+    impl->target = Vec3(hit.position[0], hit.position[1], hit.position[2]);
+    impl->activeDrag = true;
+    return true;
+}
+void PhysicsSimulation::moveDrag(Vec3 origin, Vec3 direction, ovstage_ordinal_t &ordinal)
+{
+    if (!impl->activeDrag) return;
+    const auto target = origin + normalized(direction) * impl->dragDepth;
+    float position[] = {target.x, target.y, target.z};
+    for (float value : position)
+        if (!std::isfinite(value)) throw std::runtime_error("Invalid mouse joint target.");
+    if ((target - impl->target).magnitudeSquared() < 1e-12f) return;
+    writeAttribute(impl->stage, ++ordinal, impl->jointPath, "physics:localPos0", position,
+                   {kDLFloat, 32, 3}, OVSTAGE_SEMANTIC_NONE);
+    impl->drain(ordinal);
+    impl->target = target;
+}
+void PhysicsSimulation::endDrag(ovstage_ordinal_t &ordinal)
+{
+    if (!impl->activeDrag) return;
+    uint8_t enabled = 0;
+    writeAttribute(impl->stage, ++ordinal, impl->jointPath, "physics:jointEnabled", &enabled,
+                   {kDLBool, 8, 1}, OVSTAGE_SEMANTIC_NONE);
+    impl->drain(ordinal);
+    impl->activeDrag = false;
+}
+bool PhysicsSimulation::dragging() const { return impl->activeDrag; }
 } // namespace viewer

@@ -60,6 +60,14 @@ The sample explicitly selects CPU physics; RTX still renders on the GPU.
 Other loaded USD files need enabled rigid bodies and collision/scene settings.
 Point-instanced physics output is not supported in this milestone.
 
+While simulation runs, **left-drag a movable body** to pick it up. A temporary
+D6 joint pulls the clicked point toward the cursor at the original picking
+distance, using damped translation drives while allowing free rotation. The body
+continues colliding with the scene. Release the mouse to let go; releasing over
+the UI or switching away from the window also ends the drag. Clicking empty space
+or static geometry retains camera orbit. Stop and scene replacement clear the
+joint. No picking helpers are saved into the source USD.
+
 Physics advances at a fixed 1/60 second timestep. Catch-up is capped to 0.1 seconds
 per displayed frame; minimizing or opening a file dialog does not accumulate
 simulation time. Body poses are written back to the shared in-memory ovstage,
@@ -82,7 +90,7 @@ ctest --test-dir build -C Release --output-on-failure
 The GPU test checks USD loading, rendered output, resize, failed-load recovery,
 reload, visible simulation motion/reset, and the ImGui/OpenGL backend. It needs a working GPU session.
 The CPU physics test verifies gravity, ground contact, child transforms, exact
-reset, and repeatable trajectories. The small
+reset, repeatable trajectories, ray picking, dragging, collision resistance, and release. The small
 cube under `tests/data` is a test fixture, not a startup demo.
 
 See [project.md](project.md) for the future ovphysx direction and

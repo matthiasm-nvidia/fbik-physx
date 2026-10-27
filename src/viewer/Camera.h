@@ -8,6 +8,8 @@ namespace viewer
 class Camera
 {
   public:
+    struct Ray { Vec3 origin, direction; };
+    Ray screenRay(float x, float y, float width, float height) const;
     void init();
     void reset_view();
     void look_at(const Vec3 &position, const Vec3 &target);

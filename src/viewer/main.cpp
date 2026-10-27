@@ -27,7 +27,8 @@ struct Viewer
     float sceneRadius = 5;
     bool zUp = false;
     int mouseX = 0, mouseY = 0;
-    std::string pendingLoad;
+    std::string pendingLoad, inputError;
+    viewer::RtxView *rtx = nullptr;
 };
 Viewer &state(GLFWwindow *window)
 {
@@ -68,6 +69,18 @@ void keyCallback(GLFWwindow *w, int key, int scancode, int action, int mods)
             state(w).camera.handle_key_down(key);
     }
 }
+viewer::Camera::Ray cursorRay(GLFWwindow *w, double x, double y)
+{
+    int width, height;
+    glfwGetWindowSize(w, &width, &height); // Cursor and dimensions use the same logical pixels.
+    return state(w).camera.screenRay(float(x), float(y), float(width), float(height));
+}
+void focusCallback(GLFWwindow *w, int focused)
+{
+    if (!focused && state(w).rtx)
+        try { state(w).rtx->endDrag(); }
+        catch (const std::exception &e) { state(w).inputError = e.what(); }
+}
 void mouseCallback(GLFWwindow *w, int button, int action, int mods)
 {
     ImGui_ImplGLFW_MouseButtonCallback(w, button, action, mods);
@@ -75,11 +88,22 @@ void mouseCallback(GLFWwindow *w, int button, int action, int mods)
     glfwGetCursorPos(w, &x, &y);
     state(w).mouseX = static_cast<int>(x);
     state(w).mouseY = static_cast<int>(y);
+    auto &v = state(w);
+    if (button == GLFW_MOUSE_BUTTON_LEFT && v.rtx)
+    {
+        try
+        {
+            if (action == GLFW_RELEASE) v.rtx->endDrag(); // Release also over ImGui.
+            else if (action == GLFW_PRESS && !ImGui::GetIO().WantCaptureMouse)
+                v.rtx->beginDrag(cursorRay(w, x, y));
+        }
+        catch (const std::exception &e) { v.inputError = e.what(); }
+    }
 }
 void scrollCallback(GLFWwindow *w, double x, double y)
 {
     ImGui_ImplGLFW_ScrollCallback(w, x, y);
-    if (!ImGui::GetIO().WantCaptureMouse)
+    if (!ImGui::GetIO().WantCaptureMouse && !(state(w).rtx && state(w).rtx->dragging()))
         state(w).camera.handle_wheel(static_cast<float>(y));
 }
 void cursorCallback(GLFWwindow *w, double x, double y)
@@ -88,6 +112,12 @@ void cursorCallback(GLFWwindow *w, double x, double y)
     const int dx = static_cast<int>(x) - v.mouseX, dy = static_cast<int>(y) - v.mouseY;
     v.mouseX = static_cast<int>(x);
     v.mouseY = static_cast<int>(y);
+    if (v.rtx && v.rtx->dragging())
+    {
+        try { v.rtx->moveDrag(cursorRay(w, x, y)); }
+        catch (const std::exception &e) { v.inputError = e.what(); }
+        return;
+    }
     if (ImGui::GetIO().WantCaptureMouse)
         return;
     if (glfwGetMouseButton(w, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS)
@@ -195,18 +225,27 @@ int wmain(int argc, wchar_t **argv)
     glfwSetMouseButtonCallback(window, mouseCallback);
     glfwSetScrollCallback(window, scrollCallback);
     glfwSetCursorPosCallback(window, cursorCallback);
+    glfwSetWindowFocusCallback(window, focusCallback);
     GLuint texture = 0;
     glGenTextures(1, &texture);
     int exitCode = 0;
     try
     {
         viewer::RtxView rtx;
+        v.rtx = &rtx;
         std::string error;
         bool renderFailed = false;
         double previousTime = glfwGetTime(), accumulator = 0;
         while (!glfwWindowShouldClose(window))
         {
             glfwPollEvents();
+            if (!v.inputError.empty())
+            {
+                error = v.inputError;
+                v.inputError.clear();
+                try { rtx.stopSimulation(); }
+                catch (const std::exception &e) { error += std::string("\n") + e.what(); renderFailed = true; }
+            }
             int width, height;
             glfwGetFramebufferSize(window, &width, &height);
             if (width <= 0 || height <= 0)
@@ -265,6 +304,7 @@ int wmain(int argc, wchar_t **argv)
             {
                 try
                 {
+                    rtx.endDrag();
                     const auto selected = selectUsdFile(window);
                     previousTime = glfwGetTime();
                     accumulator = 0;
@@ -322,7 +362,7 @@ int wmain(int argc, wchar_t **argv)
             if (!error.empty())
                 ImGui::TextWrapped("%s", error.c_str());
             ImGui::Separator();
-            ImGui::TextWrapped("Left drag: orbit | Right drag: look | Middle drag: pan\nWheel: move | W/A/S/D, Q/E: move | Home: frame");
+            ImGui::TextWrapped("Left drag: pick body (running) or orbit | Right drag: look | Middle drag: pan\nWheel: move | W/A/S/D, Q/E: move | Home: frame");
             ImGui::End();
             ImGui::Render();
             ImGui_ImplGLFW_RenderDrawData(ImGui::GetDrawData());
@@ -378,6 +418,7 @@ int wmain(int argc, wchar_t **argv)
         std::fprintf(stderr, "%s\n", e.what());
         exitCode = 1;
     }
+    v.rtx = nullptr;
     glDeleteTextures(1, &texture);
     ImGui_ImplGLFW_Shutdown();
     ImGui::DestroyContext(context);

@@ -66,11 +66,21 @@ def Xform "World"
                 elementSize = 2
                 interpolation = "constant"
             )
-            float[] primvars:skel:jointWeights = [0, 1] (
+            float[] primvars:skel:jointWeights = [0.69, 0.31] (
                 elementSize = 2
                 interpolation = "constant"
             )
             uniform token[] skel:joints = ["root/other", "root"]
+            rel skel:skeleton = </World/A/Rig>
+        }
+        # Extreme vertices with weak root and branch influences must not enlarge their hulls.
+        def Mesh "WeakOutliers" (prepend apiSchemas = ["SkelBindingAPI"]) {
+            point3f[] points = [(100, 100, 100), (-100, -100, -100), (100, -100, 0)]
+            int[] faceVertexCounts = [3]
+            int[] faceVertexIndices = [0, 1, 2]
+            int[] primvars:skel:jointIndices = [0, 1, 2] (elementSize = 3; interpolation = "constant")
+            float[] primvars:skel:jointWeights = [0.2, 0.3, 0.5] (elementSize = 3; interpolation = "constant")
+            uniform token[] skel:joints = ["root", "root/branchEnd", "root/other"]
             rel skel:skeleton = </World/A/Rig>
         }
     }

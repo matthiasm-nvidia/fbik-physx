@@ -1,4 +1,7 @@
 #include "Fbik.h"
+#include "MeshTools/ConvexHull.h"
+#include <PxShape.h>
+#include <map>
 #include "AnimationPlayer.h"
 #include "Skinning.h"
 #include "PhysicsSimulation.h"
@@ -15,6 +18,40 @@ void require(bool value,const char *message) { if (!value) throw std::runtime_er
 void check(ovphysx_result_t r)
 {
     if (r.status!=OVPHYSX_API_SUCCESS) { const auto e=ovphysx_get_last_error();throw std::runtime_error(std::string(e.ptr,e.length)); }
+}
+void checkHull(const MeshTools::ConvexShape &hull,const std::vector<MeshTools::Vec3> &points)
+{
+    require(hull.volume()>0 && hull.vertices.size()<=255,"Invalid convex hull volume or vertex count");
+    std::map<std::pair<unsigned,unsigned>,int> edges;
+    for(size_t f=0;f<hull.face_sizes.size();++f) {
+        const auto start=hull.face_starts[f],count=hull.face_sizes[f];
+        require(count>=3 && start+count<=hull.indices.size(),"Invalid hull face");
+        const auto a=hull.vertices.at(hull.indices[start]);
+        MeshTools::Vec3 normal(MeshTools::Zero);
+        for(size_t j=1;j+1<count;++j)
+            normal+=(hull.vertices.at(hull.indices[start+j])-a).cross(hull.vertices.at(hull.indices[start+j+1])-a);
+        normal.normalize();
+        for(const auto &p:points) {
+            if(normal.dot(p-a)>=.002) std::cerr << "Hull containment: points=" << points.size() << " face=" << f << " distance=" << normal.dot(p-a) << "\n";
+            require(normal.dot(p-a)<.002,"Hull cut away a source point");
+        }
+        for(size_t j=0;j<count;++j) {
+            const auto u=hull.indices[start+j],v=hull.indices[start+(j+1)%count];
+            ++edges[{u,v}];
+        }
+    }
+    for(const auto &[edge,count]:edges) require(count==1 && edges[{edge.second,edge.first}]==1,"Hull is not closed");
+}
+void testHullRefinement()
+{
+    using namespace MeshTools;
+    const std::vector<Vec3> points={{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+    ConvexShape hull;refineConvexHull(points,Vec3(1,1,1),.0005f,hull);
+    checkHull(hull,points);
+    require(hull.volume()<4 && hull.numFaces()>6,"Support planes did not refine the OBB");
+    for(const auto &flat:std::vector<std::vector<Vec3>>{{{0,0,0}},{{-1,0,0},{1,0,0}},{{-1,-1,0},{1,-1,0},{0,1,0}}}) {
+        refineConvexHull(flat,Vec3(1,1,.0005f),.0005f,hull);checkHull(hull,flat);
+    }
 }
 struct Scene
 {
@@ -57,6 +94,7 @@ int main(int argc,char **argv)
     int code=0;bool initialized=false;
     try
     {
+        testHullRefinement();
         require(argc==2,"Expected repository root");
         const auto root=std::filesystem::absolute(argv[1]);
         const auto binaries=(root/"deps/ovstage/bin").u8string();
@@ -68,10 +106,10 @@ int main(int argc,char **argv)
             fbik::Module module;
             auto stats=module.init(scene.stage,scene.ordinal);
             require(stats.characters==2 && stats.skeletons==3,"Multiple characters/skeletons were not discovered");
-            require(stats.boxes==1 && stats.capsules==3 && stats.leaves==6 && stats.degenerate==1,"Wrong OBB/capsule/leaf counts");
+            require(stats.convexMeshes==1 && stats.capsules==3 && stats.leaves==6 && stats.degenerate==1,"Wrong OBB/capsule/leaf counts");
             auto first=st::read(scene.stage,scene.ordinal,{"usd-prim-type","omni:fabric:worldMatrix","fbik:joint","height","radius","physics:kinematicEnabled"});
             const std::string a="/World/A/__FbikBoneColliders/Skeleton_0/";
-            require(first.at(a+"Joint_0").at("usd-prim-type").token=="Cube","Skin OBB was not a box");
+            require(first.at(a+"Joint_0").at("usd-prim-type").token=="Mesh","Skin collider was not a convex mesh");
             require(first.at(a+"Joint_1").at("usd-prim-type").token=="Capsule","Non-leaf with End in its name was skipped");
             require(!first.count(a+"Joint_2") && !first.count(a+"Joint_3") && !first.count(a+"Joint_4") && !first.count(a+"Joint_5"),"Leaf or degenerate segment has collider");
             const auto &capsule=first.at(a+"Joint_1");
@@ -91,7 +129,7 @@ int main(int argc,char **argv)
                 }
             auto repeat=module.init(scene.stage,scene.ordinal);
             auto second=st::read(scene.stage,scene.ordinal,{"usd-prim-type","omni:fabric:worldMatrix","fbik:joint","height","radius","physics:kinematicEnabled"});
-            require(repeat.boxes==stats.boxes && repeat.capsules==stats.capsules && second.size()==first.size(),"init created duplicates");
+            require(repeat.convexMeshes==stats.convexMeshes && repeat.capsules==stats.capsules && second.size()==first.size(),"init created duplicates");
             module.showColliders(true,scene.ordinal);
             module.showColliders(false,scene.ordinal);
             Physics physics;ovphysx_create_args args=OVPHYSX_CREATE_ARGS_DEFAULT;
@@ -100,21 +138,25 @@ int main(int argc,char **argv)
             const float from[]={3.4f,0,3},direction[]={0,0,-1};
             const ovphysx_scene_query_hit_t *hits=nullptr;uint32_t count=0;
             check(ovphysx_raycast(physics.handle,from,direction,10,false,OVPHYSX_SCENE_QUERY_MODE_CLOSEST,&hits,&count));
-            require(count==1,"Generated hidden box has no PhysX shape");
+            require(count==1,"Generated hidden hull has no PhysX shape");
             ovphysx_string_t path{};const auto collider=hits[0].collision;
             check(ovphysx_scene_query_get_paths_from_ids(physics.handle,&collider,1,&path,1,&count));
             require(std::string(path.ptr,path.length).find("__FbikBoneColliders")!=std::string::npos,"Ray missed generated collider");
+            void *shape=nullptr;
+            check(ovphysx_get_physx_ptr(physics.handle,path,OVPHYSX_PHYSX_TYPE_SHAPE,&shape));
+            require(shape && static_cast<physx::PxShape*>(shape)->getGeometry().getType()==physx::PxGeometryType::eCONVEXMESH,
+                    "PhysX did not cook a convex mesh body shape");
             auto output=ovphysx::utils::writeWorldTransformsToOvstage(physics.handle,scene.stage,++scene.ordinal);
             require(output.ok(),"Could not publish probe position");st::seal(scene.stage,scene.ordinal);
             auto state=st::read(scene.stage,scene.ordinal,{"omni:fabric:worldMatrix"});
             const auto y=state.at("/World/Probe").at("omni:fabric:worldMatrix").numbers[13];
             std::cout << "Probe contacting generated collider at y=" << y << '\n';
-            require(y>.3 && y<2,"Dynamic probe did not collide with kinematic bone box");
+            require(y>.3 && y<2,"Dynamic probe did not collide with kinematic bone hull");
         }
         {
             Scene scene;scene.load(root/"resources/scenes/falling_box.usda");
             fbik::Module module;auto stats=module.init(scene.stage,scene.ordinal);
-            require(stats.characters==1 && stats.skeletons==1 && stats.boxes==61 && stats.leaves==16,"SOMA collider count mismatch");
+            require(stats.characters==1 && stats.skeletons==1 && stats.convexMeshes==61 && stats.leaves==16,"SOMA collider count mismatch");
             const auto data=st::read(scene.stage,scene.ordinal,{"omni:fabric:worldMatrix","fbik:joint"});
             for(const auto &[path,prim]:data)
                 if(prim.count("fbik:joint"))
@@ -122,6 +164,21 @@ int main(int argc,char **argv)
                     const auto &m=prim.at("omni:fabric:worldMatrix").numbers;
                     require(m.size()==16 && m[12]>0 && m[12]<4 && m[13]>-1 && m[13]<3,"SOMA collider outside expected character bounds");
                 }
+            {
+                Physics physics;ovphysx_create_args args=OVPHYSX_CREATE_ARGS_DEFAULT;
+                check(ovphysx_create_instance(&args,&physics.handle));
+                check(ovphysx_attach_ovstage(physics.handle,scene.stage,scene.ordinal));
+                check(ovphysx_step_sync(physics.handle,1.0f/60));
+                size_t cooked=0;
+                for(const auto &[path,prim]:data) if(prim.count("fbik:joint")) {
+                    void *shape=nullptr;ovphysx_string_t name{path.c_str(),path.size()};
+                    check(ovphysx_get_physx_ptr(physics.handle,name,OVPHYSX_PHYSX_TYPE_SHAPE,&shape));
+                    require(shape && static_cast<physx::PxShape*>(shape)->getGeometry().getType()==physx::PxGeometryType::eCONVEXMESH,
+                            "SOMA bone is missing a cooked convex shape");
+                    ++cooked;
+                }
+                require(cooked==61,"Not all SOMA convex meshes were cooked");
+            }
             const auto initial=st::read(scene.stage,scene.ordinal,{"omni:fabric:worldMatrix"});
             viewer::Skinning skinning;skinning.init(scene.stage,scene.ordinal,module.characters());
             skinning.update(viewer::sampleAnimation(scene.stage,scene.ordinal,0,module.characters()),scene.ordinal);
@@ -166,7 +223,7 @@ int main(int argc,char **argv)
                     for (size_t i=0;i<a.size();++i) require(std::abs(a[i]-b[i])<1e-6,"Animation stop did not reset scene");
                 }
             }
-            std::cout << "SOMA: " << stats.boxes << " boxes, " << stats.leaves << " leaves omitted\n";
+            std::cout << "SOMA: " << stats.convexMeshes << " convex meshes, " << stats.leaves << " leaves omitted\n";
         }
         std::cout << "FBIK discovery, bindings, OBBs, fallback capsules, kinematic collision, animation, skinning and repeated init passed.\n";
     }

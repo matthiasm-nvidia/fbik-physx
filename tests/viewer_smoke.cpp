@@ -137,8 +137,18 @@ int main(int argc, char **argv)
                 for(size_t i=0;i<rgba.size();i+=4) out.write(reinterpret_cast<const char*>(rgba.data()+i),3);
             };
             rtx.startAnimation();
-            require(rtx.animating() && rtx.simulating(),"Animation did not start physics");
-            for(int i=0;i<75;++i) rtx.stepSimulation();
+            require(!rtx.animating() && !rtx.simulating(),"Animation started physics while stopped");
+            rtx.startSimulation();
+            rtx.startAnimation();
+            require(rtx.animating() && rtx.simulating(),"Animation did not start during simulation");
+            for(int i=0;i<20;++i) rtx.stepSimulation();
+            const double fallingBeforePause=boxHeightInImage();
+            rtx.stopAnimation();
+            require(!rtx.animating() && rtx.simulating(),"Stopping animation stopped physics");
+            for(int i=0;i<30;++i) rtx.stepSimulation();
+            require(std::abs(boxHeightInImage()-fallingBeforePause)>10,"Physics did not continue while animation was stopped");
+            rtx.startAnimation();
+            for(int i=20;i<75;++i) rtx.stepSimulation();
             const double beforePush=boxX();saveFrame("walk-before.ppm");
             for(int i=75;i<420;++i) {
                 rtx.stepSimulation();
@@ -148,10 +158,12 @@ int main(int argc, char **argv)
             const double afterPush=boxX();saveFrame("walk-after.ppm");
             require(std::abs(afterPush-beforePush)>25,"RTX did not show the character pushing the cube");
             rtx.stopAnimation();
-            require(!rtx.animating() && !rtx.simulating(),"Stop animation did not stop physics");
-            require(std::abs(boxHeightInImage()-startY)<3,"Animation stop did not visibly reset the cube");
+            require(!rtx.animating() && rtx.simulating(),"Stop animation did not leave physics running");
+            require(std::abs(boxX()-afterPush)<3,"Stop animation reset the cube");
             rtx.startAnimation();rtx.stepSimulation();
+            require(std::abs(boxX()-afterPush)<3,"Resuming animation reset the scene");
             rtx.stopSimulation();
+            require(std::abs(boxHeightInImage()-startY)<3,"Stop simulation did not reset the scene");
             require(!rtx.animating(),"Stopping physics left animation active");
             rtx.startSimulation();
             rtx.stepSimulation();

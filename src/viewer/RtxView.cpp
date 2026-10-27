@@ -476,8 +476,8 @@ void RtxView::load(const std::string &path, int width, int height)
     candidate->characterStats = candidate->characterPhysics.init(candidate->stage, candidate->ordinal);
     candidate->skinning.init(candidate->stage,candidate->ordinal,candidate->characterPhysics.characters());
     const auto &stats = candidate->characterStats;
-    std::printf("FBIK: %zu characters, %zu skeletons, %zu boxes, %zu capsules, %zu leaves skipped, %zu degenerate segments skipped\n",
-                stats.characters, stats.skeletons, stats.boxes, stats.capsules, stats.leaves, stats.degenerate);
+    std::printf("FBIK: %zu characters, %zu skeletons, %zu convex meshes, %zu capsules, %zu leaves skipped, %zu degenerate segments skipped\n",
+                stats.characters, stats.skeletons, stats.convexMeshes, stats.capsules, stats.leaves, stats.degenerate);
     frameBounds(*candidate);
     candidate->initialCamera = readStageCamera(candidate->stage, candidate->ordinal);
     if (candidate->initialCamera)
@@ -657,13 +657,13 @@ void RtxView::render(const Camera &camera, int width, int height)
 
 void RtxView::startAnimation()
 {
-    if (!loaded() || !boneColliderCount() || animating()) return;
-    stopSimulation();
-    startSimulation();
-    impl->scene->animationTime=0;
+    if (!simulating() || !boneColliderCount() || animating()) return;
     impl->scene->animationPlaying=true;
 }
-void RtxView::stopAnimation() { stopSimulation(); }
+void RtxView::stopAnimation()
+{
+    if (impl->scene) impl->scene->animationPlaying=false;
+}
 bool RtxView::animating() const { return impl->scene && impl->scene->animationPlaying; }
 
 void RtxView::startSimulation()
@@ -730,7 +730,7 @@ bool RtxView::dragging() const
 
 size_t RtxView::boneColliderCount() const
 {
-    return impl->scene ? impl->scene->characterStats.boxes + impl->scene->characterStats.capsules : 0;
+    return impl->scene ? impl->scene->characterStats.convexMeshes + impl->scene->characterStats.capsules : 0;
 }
 bool RtxView::boneCollidersVisible() const { return impl->scene && impl->scene->showBones; }
 void RtxView::showBoneColliders(bool visible)

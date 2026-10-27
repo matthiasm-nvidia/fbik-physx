@@ -108,7 +108,7 @@ Implemented with ovphysx 0.6.4, ovstage 0.2.1, and ovrtx 0.5.0. The shared ovsta
 
 ### 2. Build the physical character
 
-The first pass is implemented behind `fbik::Module`: discover `SkelRoot` characters, fit boxes to positively influenced skin vertices, and fall back to hierarchy-based capsules when no vertices are available. Leaf joints have no colliders, without altering the skeleton or using name conventions. A viewer checkbox displays the generated geometry. SOMA yields 61 boxes and 16 omitted leaves. Shapes are fitted in the initial evaluated pose and live in a replaceable in-memory USD layer. They now have kinematic rigid-body APIs and follow evaluated bone poses through fixed offsets.
+The first pass is implemented behind `fbik::Module`: discover `SkelRoot` characters, fit OBBs to skin vertices whose weight for that bone is strictly above 0.3 and refine them with 64 support-plane cuts into convex mesh colliders, and fall back to hierarchy-based capsules when no vertices are available. Leaf joints have no colliders, without altering the skeleton or using name conventions. A viewer checkbox displays the generated geometry. SOMA yields 61 convex meshes and 16 omitted leaves. Shapes are fitted in the initial evaluated pose and live in a replaceable in-memory USD layer. They now have kinematic rigid-body APIs and follow evaluated bone poses through fixed offsets.
 
 Next, create dynamic character bodies and native joints from this representation. Verify frames, units, mass properties, joint limits, and self-collision filtering before adding animation tracking.
 
@@ -124,8 +124,9 @@ ovstage control ordinal before stepping; CPU ovphysx turns these edits into nati
 kinematic targets. Bone dimensions and offsets are fixed after initialization.
 
 The sample references `soma_walk.usda`, a generated procedural gait, and separately
-authors character translation toward the cube. Start animation resets and starts the
-shared simulation. Stop animation (or Stop simulation) restores the initial scene,
+authors character translation toward the cube. Start/Stop animation resumes/pauses
+playback only while the shared simulation is running; stopping animation holds the
+character pose while physics continues. Stop simulation restores the initial scene,
 skin, and animation time. The clip holds its final pose rather than looping root motion.
 Tests cover body target tracking, skin deformation/reset, cube displacement, repeatable
 restarts, and visible RTX motion. This is one-way kinematic contact: the cube responds,

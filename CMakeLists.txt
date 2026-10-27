@@ -27,7 +27,7 @@ add_library(stage_data STATIC src/viewer/StageData.cpp)
 target_include_directories(stage_data PUBLIC src/viewer)
 target_link_libraries(stage_data PUBLIC ovstage::ovstage)
 
-add_library(fbik STATIC src/fbik/Fbik.cpp src/fbik/MeshTools/Geometry.cpp)
+add_library(fbik STATIC src/fbik/Fbik.cpp src/fbik/MeshTools/Geometry.cpp src/fbik/MeshTools/ConvexHull.cpp)
 target_include_directories(fbik PUBLIC src/fbik)
 target_link_libraries(fbik PRIVATE stage_data PUBLIC ovstage::ovstage)
 
@@ -110,6 +110,8 @@ endif()
 if(BUILD_TESTING)
     add_executable(fbik_tests tests/fbik_tests.cpp)
     target_link_libraries(fbik_tests PRIVATE viewer_core)
+    target_include_directories(fbik_tests PRIVATE ${ovphysx_PHYSX_INCLUDE_DIR})
+    target_compile_definitions(fbik_tests PRIVATE NDEBUG) # Match the shipped PhysX release ABI.
     add_dependencies(fbik_tests viewer_runtime)
     add_test(NAME fbik COMMAND fbik_tests "${CMAKE_CURRENT_SOURCE_DIR}")
     set_tests_properties(fbik PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)

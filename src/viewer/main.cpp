@@ -347,14 +347,13 @@ int wmain(int argc, wchar_t **argv)
                         try { rtx.showBoneColliders(show); }
                         catch (const std::exception &e) { error = e.what(); }
                     ImGui::Text("%zu kinematic bone bodies", rtx.boneColliderCount());
-                    if (ImGui::Button(rtx.animating() ? "Stop animation" : "Start animation")) {
+                    if (!rtx.simulating()) ImGui::TextDisabled("Start simulation to enable animation.");
+                    if (rtx.simulating() && ImGui::Button(rtx.animating() ? "Stop animation" : "Start animation")) {
                         try {
                             if (rtx.animating()) rtx.stopAnimation();
                             else if (!renderFailed) rtx.startAnimation();
                             error.clear();
                         } catch (const std::exception &e) { error=e.what(); }
-                        accumulator=0;
-                        previousTime=glfwGetTime();
                     }
                 }
                 if (ImGui::Button("Frame stage"))

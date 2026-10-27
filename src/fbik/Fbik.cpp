@@ -1,5 +1,6 @@
 #include "Fbik.h"
 #include "MeshTools/Geometry.h"
+#include "MeshTools/ConvexHull.h"
 #include "StageData.h"
 #include "SkeletonPose.h"
 #include <ovx/path_dictionary/path_dictionary_utils.h>
@@ -43,7 +44,7 @@ void pose(std::ostream &out, const Vec3 &p, const Quat &q)
     out << "double3 xformOp:translate = "; vector(out, p);
     out << "\nquatf xformOp:orient = (" << q.w << ',' << q.x << ',' << q.y << ',' << q.z << ")\n";
 }
-void collectSkin(const st::Snapshot &data, const std::string &path, Skeleton &sk)
+void collectSkin(const st::Snapshot &data, const std::string &path, Skeleton &sk, float minSkinWeight)
 {
     const auto &prim = data.at(path);
     const auto &iv = inherited(data,path,"primvars:skel:jointIndices").numbers;
@@ -92,7 +93,8 @@ void collectSkin(const st::Snapshot &data, const std::string &path, Skeleton &sk
             const size_t joint=remap[index];
             posed += skinning[joint].transform(p)*float(w);
             total += w;
-            bones.insert(joint);
+            // Evaluate the complete skinned position, but filter hull membership only.
+            if (w > minSkinWeight) bones.insert(joint);
         }
         if (total==0) continue;
         require(std::abs(total-1)<0.002, "Skin weights must sum to one: " + path);
@@ -135,8 +137,9 @@ struct Module::Impl
 };
 Module::Module() : impl(std::make_unique<Impl>()) {}
 Module::~Module() = default;
-InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal)
+InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, float minSkinWeight)
 {
+    require(std::isfinite(minSkinWeight) && minSkinWeight >= 0 && minSkinWeight <= 1, "Minimum skin weight must be between zero and one.");
     require(scene != nullptr, "init needs a populated stage.");
     require(!impl->stage || impl->stage==scene, "Use one module per stage.");
     impl->stage=scene;
@@ -181,7 +184,7 @@ InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal)
             {
                 if (get(prim,"usd-prim-type").token!="Mesh" || path.rfind(root+"/",0)!=0) continue;
                 const auto &binding=inherited(data,path,"skel:skeleton").paths;
-                if (binding.size()==1 && binding[0]==sk.path) collectSkin(data,path,sk);
+                if (binding.size()==1 && binding[0]==sk.path) collectSkin(data,path,sk,minSkinWeight);
             }
         }
         std::string name="__FbikBoneColliders";
@@ -199,7 +202,7 @@ InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal)
         const auto rootWorld=world(data.at(root));
         const float scale=std::max({rootWorld.A.column0.magnitude(),rootWorld.A.column1.magnitude(),rootWorld.A.column2.magnitude()});
         require(scale>0,"Character has zero scale.");
-        const float minSize=float(0.001/units)/scale; // Minimum full box thickness: 1 mm in world space.
+        const float minSize=float(0.001/units)/scale; // Minimum full hull thickness: 1 mm in world space.
         for (size_t si=0; si<skeletons.size(); ++si)
         {
             auto &sk=skeletons[si];
@@ -207,14 +210,20 @@ InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal)
             for (size_t j=0; j<sk.names.size(); ++j)
             {
                 if (sk.children[j].empty()) { ++result.leaves; continue; }
-                const bool box=!sk.points[j].empty();
+                const bool mesh=!sk.points[j].empty();
+                ConvexShape hull;
                 Vec3 center(Zero),size(Zero); Quat rotation(Identity); float length=0, radius=0;
-                if (box)
+                if (mesh)
                 {
                     const auto obb=computeOBBFromPoints(sk.points[j]);
                     center=obb.trans.p; rotation=obb.trans.q; size=obb.halfExtents*2;
                     size.x=std::max(size.x,minSize); size.y=std::max(size.y,minSize); size.z=std::max(size.z,minSize);
-                    ++result.boxes;
+                    const auto toLocal=inverse(Matrix(Mat33(rotation),center));
+                    std::vector<Vec3> localPoints;localPoints.reserve(sk.points[j].size());
+                    for(const auto &point:sk.points[j]) localPoints.push_back(toLocal.transform(point));
+                    refineConvexHull(localPoints,size*.5f,minSize*.5f,hull);
+                    require(!hull.empty() && hull.volume()>0,"Cannot create convex bone mesh.");
+                    ++result.convexMeshes;
                 }
                 else
                 {
@@ -229,19 +238,26 @@ InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal)
                     rotation=Quat(Mat33(x,z.cross(x),z)); center=(a+b)*0.5f; radius=length*0.1f;
                     ++result.capsules;
                 }
-                usd << "def " << (box ? "Cube" : "Capsule") << " \"Joint_" << j << "\" (prepend apiSchemas = [\"PhysicsCollisionAPI\", \"PhysicsRigidBodyAPI\"])\n{\n"
+                usd << "def " << (mesh ? "Mesh" : "Capsule") << " \"Joint_" << j << "\" (prepend apiSchemas = [\"PhysicsCollisionAPI\", \"PhysicsRigidBodyAPI\""
+                    << (mesh ? ", \"PhysicsMeshCollisionAPI\", \"PhysxConvexHullCollisionAPI\"" : "") << "])\n{\n"
                     << "custom token fbik:joint = " << quote(sk.names[j]) << "\ncustom rel fbik:skeleton = <" << sk.path << ">\n"
                     << "bool physics:rigidBodyEnabled = true\nbool physics:kinematicEnabled = true\n"
-                    << "bool physics:collisionEnabled = true\ncolor3f[] primvars:displayColor = " << (box ? "[(0.15,0.65,0.95)]" : "[(0.95,0.65,0.1)]") << "\n";
+                    << "bool physics:collisionEnabled = true\ncolor3f[] primvars:displayColor = " << (mesh ? "[(0.15,0.65,0.95)]" : "[(0.95,0.65,0.1)]") << "\n";
                 Mat33 axes(rotation);
-                if (box) axes = Mat33(axes.column0*size.x, axes.column1*size.y, axes.column2*size.z);
+
                 impl->bodies.push_back({root+"/"+name+"/Skeleton_"+std::to_string(si)+"/Joint_"+std::to_string(j),
                     sk.path,j,inverse(sk.toCharacter*sk.jointPose[j])*Matrix(axes,center)});
                 pose(usd,center,rotation);
-                if (box)
+                if (mesh)
                 {
-                    usd << "double size = 1\ndouble3 xformOp:scale = "; vector(usd,size);
-                    usd << "\nuniform token[] xformOpOrder = [\"xformOp:translate\",\"xformOp:orient\",\"xformOp:scale\"]\n";
+                    usd << "uniform token subdivisionScheme = \"none\"\nuniform token physics:approximation = \"convexHull\"\n"
+                        << "int physxConvexHullCollision:hullVertexLimit = 255\npoint3f[] points = [";
+                    for(size_t v=0;v<hull.vertices.size();++v) { if(v) usd << ',';vector(usd,hull.vertices[v]); }
+                    usd << "]\nint[] faceVertexCounts = [";
+                    for(size_t f=0;f<hull.face_sizes.size();++f) {if(f) usd << ',';usd << hull.face_sizes[f];}
+                    usd << "]\nint[] faceVertexIndices = [";
+                    for(size_t k=0;k<hull.indices.size();++k) {if(k) usd << ',';usd << hull.indices[k];}
+                    usd << "]\nuniform token[] xformOpOrder = [\"xformOp:translate\",\"xformOp:orient\"]\n";
                 }
                 else usd << "double height = " << length << "\ndouble radius = " << radius
                          << "\nuniform token axis = \"Z\"\nuniform token[] xformOpOrder = [\"xformOp:translate\",\"xformOp:orient\"]\n";

@@ -39,3 +39,13 @@ and `src/io/usd/UsdAnimation.cpp`. It uses this project's pose/primvar helpers a
 supports only the existing classic-linear character path. No solver was imported.
 `resources/scenes/soma_walk.usda` is generated locally by
 `tools/create_test_walk.py`; it contains no downloaded animation.
+
+## Convex bone colliders
+
+`src/fbik/MeshTools/ConvexHull.{h,cpp}` adapts the convex polyhedron representation,
+Fibonacci support directions, and `splitBelow` clipping implementation from
+`D:\GIT\decomposer/include/decomposer/ConvexShape.h` and `src/ConvexShape.cpp`
+(revision `b525be958c6c11f8c0f0fcfa330ca265f1ad37ed`). It uses the already bundled
+MeshTools vector types and OBB fitter. The adapted entry point refines an existing
+OBB in its local frame using 64 support planes and a small thickness allowance.
+No decomposition pipeline or external source dependency is added.

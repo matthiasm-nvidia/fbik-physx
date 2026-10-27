@@ -78,12 +78,13 @@ Source USD files are unchanged.
 
 ## Walking collision test
 
-Load the falling-box scene and click **Start animation**. This also starts physics:
-the cube falls, then SOMA walks toward it and pushes it along the floor. The walk
-runs once and holds its final pose. **Stop animation** stops physics and restores
-the character, skin, cube, and animation time; Start repeats the test. Starting
-animation during an existing simulation first resets that simulation. **Stop
-simulation** also ends animation. Loading another scene starts stopped.
+Load the falling-box scene, click **Start simulation**, then **Start animation**.
+SOMA walks toward the cube and pushes it along the floor. The walk runs once and
+holds its final pose. **Stop animation** pauses playback at its current pose while
+physics keeps running; **Start animation** resumes from that time. Animation
+controls are available while simulating and never start or reset physics.
+**Stop simulation** ends playback and restores the character, skin, cube, and
+animation time. Loading another scene starts stopped.
 
 `resources/scenes/soma_walk.usda` contains a simple procedural test gait bound to
 SOMA's existing skeleton. `falling_box.usda` references it and authors the character's
@@ -102,9 +103,15 @@ must be disabled).
 ## Character colliders
 
 On load, `fbik::Module::init` discovers skeletons under USD `SkelRoot` prims.
-For each non-leaf joint it fits an oriented box to all vertices with a positive
-weight for that joint, combining bound meshes in the initial evaluated pose.
-Without influenced vertices it creates a capsule from the joint to the average
+For each non-leaf joint it fits an oriented box to vertices with skin weights strictly above **0.3**
+for that joint, combining bound meshes in the initial evaluated pose.
+It then refines the box using 64 support-plane cuts from the decomposer algorithm.
+The resulting polygon mesh uses `PhysicsMeshCollisionAPI` with `convexHull`
+approximation, so PhysX cooks a convex mesh body shape. A 0.5 mm support allowance
+and minimum 1 mm OBB thickness keep sparse or flat input sets usable.
+The threshold is an optional `Module::init` parameter. Full skin weights still
+determine each vertex position; the threshold only selects hull vertices.
+Without qualifying vertices it creates a capsule from the joint to the average
 position of its immediate children, with radius 10% of that distance. Zero-length
 segments are skipped. Leaf joints receive no collider; the source skeleton stays
 intact and joint names have no special meaning.
@@ -112,12 +119,12 @@ intact and joint names have no special meaning.
 Generated geometry lives under each character's `__FbikBoneColliders` Xform in
 an in-memory layer. It has kinematic rigid-body and collision APIs and becomes part of the
 shared simulation on Start. Use **Show bone colliders** to inspect the shapes.
-SOMA produces 61 boxes and omits 16 leaf joints. Reinitializing replaces the
+SOMA produces 61 convex meshes and omits 16 leaf joints. Reinitializing replaces the
 module's generated layer. Source USD files are never changed.
 
 This first version supports classic linear skinning, including joint remapping
 and constant/indexed weight primvars. Blend shapes and dual-quaternion skinning
-are not supported yet. Shapes retain their fitted size and follow animation rigidly.
+are not supported yet. Shapes retain their fitted geometry and follow animation rigidly.
 Dynamic character joints and collision-driven pose correction follow later.
 
 ## Verification

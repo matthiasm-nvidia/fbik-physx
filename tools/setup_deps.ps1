@@ -10,6 +10,7 @@ $downloadRoot = Join-Path $dependencyRoot 'downloads'
 New-Item -ItemType Directory -Path $downloadRoot -Force | Out-Null
 
 foreach ($package in $manifest.packages) {
+    $backup = $null
     $destination = Join-Path $dependencyRoot $package.name
     $marker = Join-Path $destination '.package-sha256'
     if (Test-Path -LiteralPath $destination) {
@@ -19,7 +20,13 @@ foreach ($package in $manifest.packages) {
             Write-Output "$($package.name) $($package.version) is installed."
             continue
         }
-        throw "Unrecognized SDK directory: $destination. Move it aside before installing the pinned package."
+        if ((Test-Path -LiteralPath $marker) -and
+            ($package.previousSha256 -contains (Get-Content -LiteralPath $marker -Raw).Trim())) {
+            # Preserve the old installation only after the replacement is verified.
+            $backup = $destination + '-previous-' + [Guid]::NewGuid().ToString('N')
+        } else {
+            throw "Unrecognized SDK directory: $destination. Move it aside before installing the pinned package."
+        }
     }
 
     $archive = Join-Path $downloadRoot ($package.name + '-' + $package.version + '.zip')
@@ -36,16 +43,22 @@ foreach ($package in $manifest.packages) {
     $staging = Join-Path $dependencyRoot ($package.name + '-extract-' + [Guid]::NewGuid().ToString('N'))
     Write-Output "Extracting $($package.name)..."
     Expand-Archive -LiteralPath $archive -DestinationPath $staging
+    if ($package.archiveRoot) { $staging = Join-Path $staging $package.archiveRoot }
     if (-not (Test-Path -LiteralPath (Join-Path $staging $package.requiredFile))) {
         throw "Unexpected archive layout in $staging. Installation was not activated."
     }
     Set-Content -LiteralPath (Join-Path $staging '.package-sha256') -Value $package.sha256 -Encoding ASCII
     # Both absolute paths are constructed beneath the fixed project deps directory.
     $allowedPrefix = [IO.Path]::GetFullPath($dependencyRoot) + [IO.Path]::DirectorySeparatorChar
-    foreach ($candidate in @($staging, $destination)) {
+    foreach ($candidate in @($staging, $destination, $backup)) {
+        if (-not $candidate) { continue }
         if (-not [IO.Path]::GetFullPath($candidate).StartsWith($allowedPrefix, [StringComparison]::OrdinalIgnoreCase)) {
             throw 'SDK installation path escaped the project deps directory.'
         }
+    }
+    if ($backup) {
+        Move-Item -LiteralPath $destination -Destination $backup
+        Write-Output "Preserved previous SDK in $backup"
     }
     Move-Item -LiteralPath $staging -Destination $destination
     Write-Output "Installed $($package.name) $($package.version)."

@@ -4,6 +4,7 @@
 #include "viewer_imgui_theme.h"
 #include <GLFW/glfw3.h>
 #include <filesystem>
+#include <cmath>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -73,6 +74,42 @@ int main(int argc, char **argv)
             rtx.render(camera, 800, 450);
             rtx.load(file, 640, 480);
             rtx.render(camera, 640, 480);
+            rtx.load((root / "resources/scenes/falling_box.usda").u8string(), 640, 480);
+            camera.look_at(viewer::Vec3(9, 7, 10), viewer::Vec3(0, 1.5f, 0));
+            const auto boxHeightInImage = [&] {
+                for (int i = 0; i < 4; ++i) rtx.render(camera, 640, 480);
+                double sum = 0, count = 0;
+                const auto &rgba = rtx.pixels();
+                for (int y = 0; y < 480; ++y)
+                    for (int x = 0; x < 640; ++x)
+                    {
+                        const size_t pixel = (y * 640 + x) * 4;
+                        if (rgba[pixel] > 80 && rgba[pixel] > 1.35 * rgba[pixel+1] && rgba[pixel] > 1.35 * rgba[pixel+2])
+                        { sum += y; ++count; }
+                    }
+                require(count > 50, "Falling box is not visible in RTX image");
+                std::cout << "Box image centroid: " << sum/count << " pixels=" << count << std::endl;
+                return sum / count;
+            };
+            const auto startY = boxHeightInImage();
+            rtx.startSimulation();
+            require(rtx.simulating(), "Start did not enter simulation");
+            for (int i = 0; i < 180; ++i)
+            {
+                rtx.stepSimulation();
+                if (i % 10 == 0) rtx.render(camera, 640, 480);
+            }
+            const auto endY = boxHeightInImage();
+            require(std::abs(endY - startY) > 30, "RTX did not show the falling box motion");
+            camera.pos.x += 0.01f; // Camera hierarchy updates must preserve the simulated pose.
+            require(std::abs(boxHeightInImage() - endY) < 3, "Camera movement reset simulated geometry");
+            rtx.stopSimulation();
+            require(!rtx.simulating(), "Stop did not leave simulation");
+            require(std::abs(boxHeightInImage() - startY) < 3, "RTX did not show restored pose");
+            rtx.startSimulation();
+            rtx.stepSimulation();
+            rtx.load(file, 640, 480);
+            require(!rtx.simulating(), "Loading a new stage retained the old simulation");
             glViewport(0, 0, 640, 480);
             glClear(GL_COLOR_BUFFER_BIT);
             ImGui_ImplGLFW_NewFrame();

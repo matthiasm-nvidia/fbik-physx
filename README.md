@@ -1,9 +1,8 @@
 # FBIK PhysX â€” viewer foundation
 
-A minimal Windows USD viewer using OpenGL, GLFW, Dear ImGui, ovstage, and ovrtx.
+A Windows USD viewer with ovphysx simulation, OpenGL, GLFW, Dear ImGui, ovstage, and ovrtx.
 It retains the FBIK viewer's ImGui theme, fonts, camera navigation, and Windows
-build setup. This first step contains no animation, IK, physics simulation, or
-demo controls.
+build setup. Character animation, joints, and IK are future work.
 
 ## Build and run
 
@@ -46,6 +45,27 @@ the viewer camera and studio light are added only to the in-memory stage.
 Initial RTX shader preparation may take several minutes. Runtime logs are under
 `deps/ovrtx/bin`.
 
+## Falling box simulation
+
+Click **Load falling box**, then **Start simulation**. The button changes to
+**Stop simulation** while the orange box falls onto the static ground. Stop
+restores the original pose and discards the physics instance, including velocities
+and contact state. Start again to repeat the drop. Loading another USD ends the
+previous simulation and opens the new stage stopped.
+
+The editable sample is `resources/scenes/falling_box.usda` (copied beside the
+executable by the build). It uses meters, Y-up, gravity of 9.81 m/s², a 1 kg box
+with rigid-body and collision APIs, and a thin static floor whose top is y=0.
+The sample explicitly selects CPU physics; RTX still renders on the GPU.
+Other loaded USD files need enabled rigid bodies and collision/scene settings.
+Point-instanced physics output is not supported in this milestone.
+
+Physics advances at a fixed 1/60 second timestep. Catch-up is capped to 0.1 seconds
+per displayed frame; minimizing or opening a file dialog does not accumulate
+simulation time. Body poses are written back to the shared in-memory ovstage,
+including child geometry. Physics output is never fed back as new physics input.
+Source USD files are unchanged.
+
 ## Verification
 
 ```bat
@@ -60,7 +80,9 @@ ctest --test-dir build -C Release --output-on-failure
 ```
 
 The GPU test checks USD loading, rendered output, resize, failed-load recovery,
-reload, and the ImGui/OpenGL backend. It needs a working GPU session. The small
+reload, visible simulation motion/reset, and the ImGui/OpenGL backend. It needs a working GPU session.
+The CPU physics test verifies gravity, ground contact, child transforms, exact
+reset, and repeatable trajectories. The small
 cube under `tests/data` is a test fixture, not a startup demo.
 
 See [project.md](project.md) for the future ovphysx direction and

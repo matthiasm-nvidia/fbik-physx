@@ -203,6 +203,7 @@ int wmain(int argc, wchar_t **argv)
         viewer::RtxView rtx;
         std::string error;
         bool renderFailed = false;
+        double previousTime = glfwGetTime(), accumulator = 0;
         while (!glfwWindowShouldClose(window))
         {
             glfwPollEvents();
@@ -210,8 +211,32 @@ int wmain(int argc, wchar_t **argv)
             glfwGetFramebufferSize(window, &width, &height);
             if (width <= 0 || height <= 0)
             {
+                previousTime = glfwGetTime();
+                accumulator = 0;
                 glfwWaitEventsTimeout(0.05);
                 continue;
+            }
+            const double now = glfwGetTime();
+            const double elapsed = std::min(now - previousTime, 0.1);
+            previousTime = now;
+            if (rtx.simulating() && !renderFailed)
+            {
+                accumulator += elapsed;
+                try
+                {
+                    while (accumulator >= 1.0 / 60.0)
+                    {
+                        rtx.stepSimulation();
+                        accumulator -= 1.0 / 60.0;
+                    }
+                }
+                catch (const std::exception &e)
+                {
+                    error = e.what();
+                    try { rtx.stopSimulation(); }
+                    catch (const std::exception &reset) { error += std::string("\nReset failed: ") + reset.what(); renderFailed = true; }
+                    accumulator = 0;
+                }
             }
             glViewport(0, 0, width, height);
             glClearColor(0.055f, 0.065f, 0.075f, 1);
@@ -241,6 +266,8 @@ int wmain(int argc, wchar_t **argv)
                 try
                 {
                     const auto selected = selectUsdFile(window);
+                    previousTime = glfwGetTime();
+                    accumulator = 0;
                     if (!selected.empty())
                         v.pendingLoad = selected;
                 }
@@ -268,11 +295,25 @@ int wmain(int argc, wchar_t **argv)
                 }
                 ImGui::EndPopup();
             }
+            if (ImGui::Button("Load falling box"))
+                v.pendingLoad = (executableDirectory / "resources/scenes/falling_box.usda").u8string();
             if (rtx.loaded())
             {
                 ImGui::TextWrapped("%s", rtx.path().c_str());
                 if (ImGui::Button("Frame stage"))
                     frameScene(v);
+                if (ImGui::Button(rtx.simulating() ? "Stop simulation" : "Start simulation"))
+                {
+                    try
+                    {
+                        if (rtx.simulating()) rtx.stopSimulation();
+                        else if (!renderFailed) rtx.startSimulation();
+                        error.clear();
+                    }
+                    catch (const std::exception &e) { error = e.what(); }
+                    accumulator = 0;
+                    previousTime = glfwGetTime();
+                }
             }
             else
                 ImGui::TextWrapped("Load a USD file to view it.");
@@ -327,6 +368,8 @@ int wmain(int argc, wchar_t **argv)
                 const auto title = rtx.loaded() ? "FBIK PhysX - " + std::filesystem::u8path(rtx.path()).filename().u8string()
                                                 : "FBIK PhysX - USD Viewer";
                 glfwSetWindowTitle(window, title.c_str());
+                previousTime = glfwGetTime();
+                accumulator = 0;
             }
         }
     }

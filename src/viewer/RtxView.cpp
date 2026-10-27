@@ -1,4 +1,5 @@
 #include "RtxView.h"
+#include "PhysicsSimulation.h"
 #include "StageCamera.h"
 #include <algorithm>
 #include <array>
@@ -100,8 +101,10 @@ struct Scene
     bool zUp = false;
     std::optional<StageCamera> initialCamera;
     std::string path;
+    std::unique_ptr<PhysicsSimulation> physics;
     ~Scene()
     {
+        physics.reset();
         if (stage)
         {
             // Destruction completes pending operations and releases stage-owned queries.
@@ -370,6 +373,7 @@ struct RtxView::Impl
 {
     ovrtx_renderer_t *renderer = nullptr;
     bool initialized = false;
+    std::unique_ptr<PhysicsRuntime> physicsRuntime;
     bool attached = false;
     std::unique_ptr<Scene> scene;
     std::vector<uint8_t> pixels;
@@ -383,6 +387,7 @@ struct RtxView::Impl
         scene.reset();
         if (renderer)
             ovrtx_destroy_renderer(renderer);
+        physicsRuntime.reset();
         if (initialized)
             ovstage_shutdown();
     }
@@ -409,6 +414,13 @@ void RtxView::initialize(const std::string &executableDirectory)
     ovstage_config_t stageConfig{stageEntries, 1};
     stageCheck(ovstage_initialize(&stageConfig), "Initialize stage runtime");
     impl->initialized = true;
+    try { impl->physicsRuntime = std::make_unique<PhysicsRuntime>(); }
+    catch (...)
+    {
+        ovstage_shutdown();
+        impl->initialized = false;
+        throw;
+    }
 }
 
 void RtxView::load(const std::string &path, int width, int height)
@@ -424,7 +436,7 @@ void RtxView::load(const std::string &path, int width, int height)
     stageCheck(ovstage_create_instance(&desc, &candidate->stage), "Create stage");
     const ovx_string_t metadata[] = {lit("upAxis"), lit("metersPerUnit")};
     ovstage_population_desc_t population{};
-    population.domains = OVSTAGE_POPULATION_DOMAIN_RENDERING;
+    population.domains = OVSTAGE_POPULATION_DOMAIN_ALL;
     std::vector<ovx_string_t> properties;
     for (const auto *name : cameraAttributeNames)
         properties.push_back(lit(name));
@@ -620,6 +632,30 @@ void RtxView::render(const Camera &camera, int width, int height)
             ovrtx_destroy_results(impl->renderer, resultHandle);
         throw;
     }
+}
+
+
+void RtxView::startSimulation()
+{
+    if (loaded() && !simulating())
+        impl->scene->physics = std::make_unique<PhysicsSimulation>(impl->scene->stage, impl->scene->ordinal);
+}
+void RtxView::stopSimulation()
+{
+    if (simulating())
+    {
+        impl->scene->physics->stop(impl->scene->ordinal);
+        impl->scene->physics.reset();
+
+    }
+}
+void RtxView::stepSimulation()
+{
+    if (simulating()) impl->scene->physics->step(impl->scene->ordinal);
+}
+bool RtxView::simulating() const
+{
+    return impl->scene && bool(impl->scene->physics);
 }
 
 bool RtxView::loaded() const

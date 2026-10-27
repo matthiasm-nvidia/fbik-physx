@@ -6,7 +6,7 @@ Build a full-body pose correction system for animated characters using ovphysx f
 
 Scene objects and character bones will participate in the same PhysX simulation. PhysX will handle their collision detection and physical interaction. The first implementation will use PhysX joints for the character's constraints and animation tracking. A custom IK solver will be considered only if this approach cannot provide sufficient stability or the desired behavior.
 
-Status: the minimal standalone viewer is implemented. Physics and IK remain future work.
+Status: the standalone viewer and initial ovphysx integration are implemented. The falling-box USD verifies gravity and contact; Start/Stop runs and resets the simulation. Character bodies, joints, animation tracking, and IK remain future work.
 
 ## First step: minimal standalone viewer
 
@@ -102,7 +102,9 @@ The decision should follow reproducible failures of the native approach and meas
 
 ### 1. Verify ovphysx integration
 
-Confirm the available interfaces and build requirements. Establish a minimal scene with static geometry and a dynamic object, and verify stepping and transform readback.
+Implemented with ovphysx 0.6.4, ovstage 0.2.1, and ovrtx 0.5.0. The shared ovstage is populated with physics and rendering data after registering the bundled PhysX schemas. Simulation uses fixed 1/60 second steps, publishes body transforms, converts them to local transforms, and recomputes the hierarchy for child geometry. Simulation output ordinals are never drained back into physics.
+
+`resources/scenes/falling_box.usda` contains a static ground slab and a dynamic 1 kg box. The viewer's Start simulation button changes to Stop simulation. Stop restores the starting transforms and destroys the physics instance so restarting clears velocities and contacts. Tests cover gravity, settling, child geometry, exact reset, repeatability, and visible RTX motion/reset. Point-instanced body writeback is outside this milestone.
 
 ### 2. Build the physical character
 

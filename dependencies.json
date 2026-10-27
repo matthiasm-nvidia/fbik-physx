@@ -3,10 +3,13 @@
   "packages": [
     {
       "name": "ovstage",
-      "version": "0.2.0.377349.70d78229",
-      "url": "https://github.com/NVIDIA-Omniverse/ovstage/releases/download/v0.2.0/ovstage%400.2.0.377349.70d78229.windows-x86_64.zip",
-      "sha256": "2ca9a39310f6a0622166c4bca2affbe11695c592ec6b22e74a7a1b5dacd0cdff",
-      "requiredFile": "lib/cmake/ovstage/ovstageConfig.cmake"
+      "version": "0.2.1.385922.d4f26803",
+      "url": "https://github.com/NVIDIA-Omniverse/ovstage/releases/download/v0.2.1/ovstage%400.2.1.385922.d4f26803.windows-x86_64.zip",
+      "sha256": "5197b2f3663f26a8f6d0448a255a5e87484b7df59805145eeee0c7e43cbdaedd",
+      "requiredFile": "lib/cmake/ovstage/ovstageConfig.cmake",
+      "previousSha256": [
+        "2ca9a39310f6a0622166c4bca2affbe11695c592ec6b22e74a7a1b5dacd0cdff"
+      ]
     },
     {
       "name": "ovrtx",
@@ -14,6 +17,14 @@
       "url": "https://github.com/NVIDIA-Omniverse/ovrtx/releases/download/v0.5.0/ovrtx%400.5.0.377615.868bf616.windows-x86_64.zip",
       "sha256": "3662d6da47b9817dac623010acd67fac3a2ff838bb21c93c20fab36e65e8ffd0",
       "requiredFile": "lib/cmake/ovrtx/ovrtxConfig.cmake"
+    },
+    {
+      "name": "ovphysx",
+      "version": "0.6.4.72118723",
+      "url": "https://github.com/NVIDIA-Omniverse/PhysX/releases/download/ovphysx-0.6.4/ovphysx-windows-x86_64-0.6.4.72118723.zip",
+      "sha256": "a3c7df77be0a83e86b0fb6a2237df2a41c1c6261fc8e00d05c24f747bf8772b7",
+      "requiredFile": "lib/cmake/ovphysx/ovphysxConfig.cmake",
+      "archiveRoot": "ovphysx"
     }
   ]
 }

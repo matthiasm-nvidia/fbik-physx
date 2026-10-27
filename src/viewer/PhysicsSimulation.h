@@ -1,0 +1,32 @@
+#pragma once
+#include "StageData.h"
+#include <memory>
+
+namespace viewer
+{
+// Process runtime must outlive all simulations and be initialized before USD population.
+class PhysicsRuntime
+{
+  public:
+    PhysicsRuntime();
+    ~PhysicsRuntime();
+    PhysicsRuntime(const PhysicsRuntime &) = delete;
+    PhysicsRuntime &operator=(const PhysicsRuntime &) = delete;
+};
+
+class PhysicsSimulation
+{
+  public:
+    PhysicsSimulation(ovstage_instance_t *stage, ovstage_ordinal_t ordinal);
+    ~PhysicsSimulation();
+    PhysicsSimulation(const PhysicsSimulation &) = delete;
+    PhysicsSimulation &operator=(const PhysicsSimulation &) = delete;
+    void step(ovstage_ordinal_t &ordinal);
+    void stop(ovstage_ordinal_t &ordinal);
+    static constexpr float timeStep = 1.0f / 60.0f;
+
+  private:
+    struct Impl;
+    std::unique_ptr<Impl> impl;
+};
+} // namespace viewer

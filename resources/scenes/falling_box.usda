@@ -4,6 +4,9 @@
     metersPerUnit = 1
     kilogramsPerUnit = 1
     upAxis = "Y"
+    startTimeCode = 0
+    endTimeCode = 480
+    timeCodesPerSecond = 60
 )
 def Xform "World"
 {
@@ -11,15 +14,28 @@ def Xform "World"
     def Xform "Character"
     {
         double3 xformOp:translate = (2, 0, 0)
+        double3 xformOp:translate.timeSamples = {
+            0: (2, 0, 0),
+            75: (2, 0, 0),
+            405: (-1.575, 0, 0),
+            480: (-1.575, 0, 0),
+        }
+        float xformOp:rotateY = -90
         double3 xformOp:scale = (0.01, 0.01, 0.01)
-        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateY", "xformOp:scale"]
 
         def "Soma" (
             prepend references = @soma.usd@</OUTPUT>
         )
         {
+            over "c_skeleton_grp" {
+                over "Root" {
+                    rel skel:animationSource = </World/Walk>
+                }
+            }
         }
     }
+    def SkelAnimation "Walk" (prepend references = @soma_walk.usda@</Walk>) {}
 
     def PhysicsScene "PhysicsScene" (
         prepend apiSchemas = ["PhysxSceneAPI"]

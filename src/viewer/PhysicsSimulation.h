@@ -1,5 +1,6 @@
 #pragma once
 #include "StageData.h"
+#include "Fbik.h"
 #include "CameraMath.h"
 #include <memory>
 
@@ -22,6 +23,7 @@ class PhysicsSimulation
     ~PhysicsSimulation();
     PhysicsSimulation(const PhysicsSimulation &) = delete;
     PhysicsSimulation &operator=(const PhysicsSimulation &) = delete;
+    void setKinematicTargets(const std::vector<fbik::BodyTarget> &targets, ovstage_ordinal_t &ordinal);
     void step(ovstage_ordinal_t &ordinal);
     void stop(ovstage_ordinal_t &ordinal);
     bool beginDrag(Vec3 origin, Vec3 direction, ovstage_ordinal_t &ordinal);

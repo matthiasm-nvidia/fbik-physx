@@ -1,6 +1,8 @@
 #include "RtxView.h"
 #include "PhysicsSimulation.h"
 #include "Fbik.h"
+#include "AnimationPlayer.h"
+#include "Skinning.h"
 #include "StageCamera.h"
 #include <algorithm>
 #include <array>
@@ -104,8 +106,10 @@ struct Scene
     std::string path;
     std::unique_ptr<PhysicsSimulation> physics;
     fbik::Module characterPhysics;
+    Skinning skinning;
     fbik::InitResult characterStats;
-    bool showBones = false;
+    bool showBones = false, animationPlaying = false;
+    double animationTime = 0;
     ~Scene()
     {
         physics.reset();
@@ -470,6 +474,7 @@ void RtxView::load(const std::string &path, int width, int height)
     ++candidate->ordinal;
     candidate->seal();
     candidate->characterStats = candidate->characterPhysics.init(candidate->stage, candidate->ordinal);
+    candidate->skinning.init(candidate->stage,candidate->ordinal,candidate->characterPhysics.characters());
     const auto &stats = candidate->characterStats;
     std::printf("FBIK: %zu characters, %zu skeletons, %zu boxes, %zu capsules, %zu leaves skipped, %zu degenerate segments skipped\n",
                 stats.characters, stats.skeletons, stats.boxes, stats.capsules, stats.leaves, stats.degenerate);
@@ -491,6 +496,8 @@ void RtxView::load(const std::string &path, int width, int height)
                    ovstage_population_add_usd_reference_from_string(candidate->stage, str(layer), lit("/"), nullptr));
     populationWait(candidate->stage, ovstage_population_apply_usd_changes(candidate->stage, ++candidate->ordinal));
     candidate->seal();
+    if (!candidate->characterPhysics.characters().empty())
+        candidate->skinning.update(sampleAnimation(candidate->stage,candidate->ordinal,0,candidate->characterPhysics.characters()),candidate->ordinal);
     candidate->camera = candidate->query((candidate->viewerRoot + "/Camera").c_str());
     candidate->product = candidate->query((candidate->viewerRoot + "/View").c_str());
     if (impl->attached)
@@ -648,6 +655,17 @@ void RtxView::render(const Camera &camera, int width, int height)
 }
 
 
+void RtxView::startAnimation()
+{
+    if (!loaded() || !boneColliderCount() || animating()) return;
+    stopSimulation();
+    startSimulation();
+    impl->scene->animationTime=0;
+    impl->scene->animationPlaying=true;
+}
+void RtxView::stopAnimation() { stopSimulation(); }
+bool RtxView::animating() const { return impl->scene && impl->scene->animationPlaying; }
+
 void RtxView::startSimulation()
 {
     if (loaded() && !simulating())
@@ -659,13 +677,26 @@ void RtxView::stopSimulation()
     {
         impl->scene->physics->stop(impl->scene->ordinal);
         impl->scene->physics.reset();
+        if (!impl->scene->characterPhysics.characters().empty()) {
+            impl->scene->skinning.update(sampleAnimation(impl->scene->stage,impl->scene->ordinal,0,impl->scene->characterPhysics.characters()),impl->scene->ordinal);
+            impl->scene->animationPlaying=false;
+            impl->scene->animationTime=0;
+        }
         impl->lastLens = {}; // Removing the temporary joint layer can refresh viewer attributes.
 
     }
 }
 void RtxView::stepSimulation()
 {
-    if (simulating()) impl->scene->physics->step(impl->scene->ordinal);
+    if (!simulating()) return;
+    auto &s=*impl->scene;
+    if (s.animationPlaying) {
+        s.animationTime+=PhysicsSimulation::timeStep;
+        auto poses=sampleAnimation(s.stage,s.ordinal,s.animationTime,s.characterPhysics.characters());
+        s.skinning.update(poses,s.ordinal);
+        s.physics->setKinematicTargets(s.characterPhysics.updateTargets(poses),s.ordinal);
+    }
+    s.physics->step(s.ordinal);
 }
 bool RtxView::simulating() const
 {
@@ -677,7 +708,12 @@ bool RtxView::beginDrag(const Camera::Ray &ray)
     if (!simulating()) return false;
     // Reference population may refresh camera/product attributes from their USD layer.
     impl->lastLens = {};
-    return impl->scene->physics->beginDrag(ray.origin, ray.direction, impl->scene->ordinal);
+    auto &s=*impl->scene;
+    const bool picked=s.physics->beginDrag(ray.origin,ray.direction,s.ordinal);
+    // Adding the mouse-joint layer can repopulate authored (unskinned) mesh points.
+    if (picked && !s.characterPhysics.characters().empty())
+        s.skinning.update(sampleAnimation(s.stage,s.ordinal,s.animationTime,s.characterPhysics.characters()),s.ordinal);
+    return picked;
 }
 void RtxView::moveDrag(const Camera::Ray &ray)
 {

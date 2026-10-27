@@ -6,7 +6,7 @@ Build a full-body pose correction system for animated characters using ovphysx f
 
 Scene objects and character bones will participate in the same PhysX simulation. PhysX will handle their collision detection and physical interaction. The first implementation will use PhysX joints for the character's constraints and animation tracking. A custom IK solver will be considered only if this approach cannot provide sufficient stability or the desired behavior.
 
-Status: the standalone viewer and initial ovphysx integration are implemented. The falling-box USD verifies gravity and contact; Start/Stop runs and resets the simulation. Initial static character colliders are implemented; dynamic character bodies, joints, animation tracking, and IK remain future work.
+Status: the standalone viewer and initial ovphysx integration are implemented. The falling-box USD verifies gravity and contact; Start/Stop runs and resets the simulation. Kinematic character bodies, USD animation playback, and viewer-side skinning are implemented. A procedural SOMA walk pushes the cube. Dynamic character bodies, joints, animation drives, and IK remain future work.
 
 ## First step: minimal standalone viewer
 
@@ -108,9 +108,29 @@ Implemented with ovphysx 0.6.4, ovstage 0.2.1, and ovrtx 0.5.0. The shared ovsta
 
 ### 2. Build the physical character
 
-The first pass is implemented behind `fbik::Module`: discover `SkelRoot` characters, fit static boxes to positively influenced skin vertices, and fall back to hierarchy-based capsules when no vertices are available. Leaf joints have no colliders, without altering the skeleton or using name conventions. A viewer checkbox displays the generated geometry. SOMA yields 61 boxes and 16 omitted leaves. Shapes use the initial evaluated pose and live in a replaceable in-memory USD layer.
+The first pass is implemented behind `fbik::Module`: discover `SkelRoot` characters, fit boxes to positively influenced skin vertices, and fall back to hierarchy-based capsules when no vertices are available. Leaf joints have no colliders, without altering the skeleton or using name conventions. A viewer checkbox displays the generated geometry. SOMA yields 61 boxes and 16 omitted leaves. Shapes are fitted in the initial evaluated pose and live in a replaceable in-memory USD layer. They now have kinematic rigid-body APIs and follow evaluated bone poses through fixed offsets.
 
 Next, create dynamic character bodies and native joints from this representation. Verify frames, units, mass properties, joint limits, and self-collision filtering before adding animation tracking.
+
+### 2a. Kinematic walking collision test — implemented
+
+The viewer owns the playback clock and samples USD animation at each physics tick.
+It computes skeletal forward kinematics and updates mesh points, smooth vertex normals,
+and bounds for rendering. `fbik::Module::characters()` provides skeleton/character
+paths and joint ordering; `updateTargets(poses)` accepts a world character transform
+and character-space bone matrices and returns local/world body targets. FBIK never
+samples animation or steps the solver. The physics module submits a dedicated
+ovstage control ordinal before stepping; CPU ovphysx turns these edits into native
+kinematic targets. Bone dimensions and offsets are fixed after initialization.
+
+The sample references `soma_walk.usda`, a generated procedural gait, and separately
+authors character translation toward the cube. Start animation resets and starts the
+shared simulation. Stop animation (or Stop simulation) restores the initial scene,
+skin, and animation time. The clip holds its final pose rather than looping root motion.
+Tests cover body target tracking, skin deformation/reset, cube displacement, repeatable
+restarts, and visible RTX motion. This is one-way kinematic contact: the cube responds,
+while the character continues following its animation. Dynamic bones and joints will
+provide collision-driven character response in the next milestone.
 
 ### 3. Track animation with native joints
 

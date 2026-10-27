@@ -32,3 +32,10 @@ helpers from `source/lib/MeshTools/utils/HeaderMath.h`. Surface fitting, convex
 optimization, and other unrelated geometry functions are excluded; temporary
 storage uses `std::vector`. The original NVIDIA source notices are retained.
 These files are bundled here and require no external source checkout.
+
+The viewer-side skinning implementation follows the linear-skinning and ovstage
+mesh-write approach inspected in the original FBIK `src/animation/Skeleton.cpp`
+and `src/io/usd/UsdAnimation.cpp`. It uses this project's pose/primvar helpers and
+supports only the existing classic-linear character path. No solver was imported.
+`resources/scenes/soma_walk.usda` is generated locally by
+`tools/create_test_walk.py`; it contains no downloaded animation.

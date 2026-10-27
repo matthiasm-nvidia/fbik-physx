@@ -2,7 +2,8 @@
 
 A Windows USD viewer with ovphysx simulation, OpenGL, GLFW, Dear ImGui, ovstage, and ovrtx.
 It retains the FBIK viewer's ImGui theme, fonts, camera navigation, and Windows
-build setup. Character animation, joints, and IK are future work.
+build setup. USD animation playback and kinematic character collision are implemented;
+dynamic character joints and IK are future work.
 
 ## Build and run
 
@@ -38,8 +39,9 @@ the scene bounds. **Frame stage** or Home restores automatic framing. Left drag
 orbits, right drag looks around, middle drag pans, the wheel moves forward/back,
 and W/A/S/D and Q/E move the camera. Escape closes the viewer.
 
-USD rendering is delegated to the pinned native SDKs, sampled at time zero.
-The FBIK module evaluates the initial skeletal pose to fit collision shapes. Referenced
+USD animation is sampled at time zero on load and advanced by Start animation.
+The viewer evaluates the skeleton and updates skinned mesh points, smooth normals,
+and bounds for the native renderer. FBIK fits collision shapes at initialization. Referenced
 assets must be available to the SDK. Source files are never saved or modified;
 the viewer camera and studio light are added only to the in-memory stage.
 Initial RTX shader preparation may take several minutes. Runtime logs are under
@@ -74,7 +76,30 @@ simulation time. Body poses are written back to the shared in-memory ovstage,
 including child geometry. Physics output is never fed back as new physics input.
 Source USD files are unchanged.
 
-## Initial character colliders
+## Walking collision test
+
+Load the falling-box scene and click **Start animation**. This also starts physics:
+the cube falls, then SOMA walks toward it and pushes it along the floor. The walk
+runs once and holds its final pose. **Stop animation** stops physics and restores
+the character, skin, cube, and animation time; Start repeats the test. Starting
+animation during an existing simulation first resets that simulation. **Stop
+simulation** also ends animation. Loading another scene starts stopped.
+
+`resources/scenes/soma_walk.usda` contains a simple procedural test gait bound to
+SOMA's existing skeleton. `falling_box.usda` references it and authors the character's
+forward movement. `soma.usd` remains unchanged. This is not a Mixamo/motion-capture
+clip. `tools/create_test_walk.py` regenerates the clip with Python USD; Python is
+not required to build or run the viewer.
+
+The viewer owns the fixed-step clock, USD sampling, forward kinematics and CPU
+linear skinning. FBIK receives evaluated character-space bone poses and maps them
+through fixed bone-to-body offsets. Physics receives matching local/world body
+transforms on a separate control ordinal; ovphysx converts those changes to
+kinematic targets before its 1/60-second step. Physics output is never drained back
+as control input. This path uses the sample's CPU physics configuration (DirectGPU
+must be disabled).
+
+## Character colliders
 
 On load, `fbik::Module::init` discovers skeletons under USD `SkelRoot` prims.
 For each non-leaf joint it fits an oriented box to all vertices with a positive
@@ -85,15 +110,15 @@ segments are skipped. Leaf joints receive no collider; the source skeleton stays
 intact and joint names have no special meaning.
 
 Generated geometry lives under each character's `__FbikBoneColliders` Xform in
-an in-memory layer. It has static PhysX collision enabled and becomes part of the
+an in-memory layer. It has kinematic rigid-body and collision APIs and becomes part of the
 shared simulation on Start. Use **Show bone colliders** to inspect the shapes.
 SOMA produces 61 boxes and omits 16 leaf joints. Reinitializing replaces the
 module's generated layer. Source USD files are never changed.
 
 This first version supports classic linear skinning, including joint remapping
 and constant/indexed weight primvars. Blend shapes and dual-quaternion skinning
-are not supported yet. Shapes remain static in the initial pose; character
-joints, animation tracking, and pose correction follow later.
+are not supported yet. Shapes retain their fitted size and follow animation rigidly.
+Dynamic character joints and collision-driven pose correction follow later.
 
 ## Verification
 
@@ -114,7 +139,9 @@ The CPU physics test verifies gravity, ground contact, child transforms, exact
 reset, repeatable trajectories, ray picking, dragging, collision resistance, and release. The small
 cube under `tests/data` is a test fixture, not a startup demo. The FBIK test covers
 multiple characters and skeletons, skin bindings, fallback capsules, leaf omission,
-repeat initialization, character transforms, and PhysX contact with generated geometry.
+repeat initialization, character transforms, kinematic target tracking, skin deformation,
+physical cube displacement, and repeatable animation/reset. The RTX test also checks
+visible cube displacement during the walk.
 
 See [project.md](project.md) for the future ovphysx direction and
 [source provenance](third_party/PROVENANCE.md) for copied components and licenses.

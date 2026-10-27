@@ -119,6 +119,40 @@ int main(int argc, char **argv)
             rtx.stopSimulation();
             require(!rtx.simulating(), "Stop did not leave simulation");
             require(std::abs(boxHeightInImage() - startY) < 3, "RTX did not show restored pose");
+            const auto boxX = [&] {
+                boxHeightInImage();
+                double sum=0,count=0;
+                const auto &rgba=rtx.pixels();
+                for (int y=0;y<480;++y) for (int x=0;x<640;++x) {
+                    const auto i=(y*640+x)*4;
+                    if (rgba[i]>80 && rgba[i]>1.35*rgba[i+1] && rgba[i]>1.35*rgba[i+2]) {sum+=x;++count;}
+                }
+                require(count>50,"Animated test cube is not visible");
+                return sum/count;
+            };
+            const auto saveFrame = [&](const char *name) {
+                std::ofstream out(root/"build"/name,std::ios::binary);
+                out << "P6\n640 480\n255\n";
+                const auto &rgba=rtx.pixels();
+                for(size_t i=0;i<rgba.size();i+=4) out.write(reinterpret_cast<const char*>(rgba.data()+i),3);
+            };
+            rtx.startAnimation();
+            require(rtx.animating() && rtx.simulating(),"Animation did not start physics");
+            for(int i=0;i<75;++i) rtx.stepSimulation();
+            const double beforePush=boxX();saveFrame("walk-before.ppm");
+            for(int i=75;i<420;++i) {
+                rtx.stepSimulation();
+                if(i%20==0) rtx.render(camera,640,480);
+                if(i==180) saveFrame("walk-middle.ppm");
+            }
+            const double afterPush=boxX();saveFrame("walk-after.ppm");
+            require(std::abs(afterPush-beforePush)>25,"RTX did not show the character pushing the cube");
+            rtx.stopAnimation();
+            require(!rtx.animating() && !rtx.simulating(),"Stop animation did not stop physics");
+            require(std::abs(boxHeightInImage()-startY)<3,"Animation stop did not visibly reset the cube");
+            rtx.startAnimation();rtx.stepSimulation();
+            rtx.stopSimulation();
+            require(!rtx.animating(),"Stopping physics left animation active");
             rtx.startSimulation();
             rtx.stepSimulation();
             require(rtx.beginDrag({{0, 4, 6}, {0, 0, -1}}), "Grab before scene replacement failed");

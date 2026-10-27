@@ -207,6 +207,24 @@ PhysicsSimulation::PhysicsSimulation(ovstage_instance_t *s, ovstage_ordinal_t or
 }
 PhysicsSimulation::~PhysicsSimulation() = default;
 
+void PhysicsSimulation::setKinematicTargets(const std::vector<fbik::BodyTarget> &targets, ovstage_ordinal_t &ordinal)
+{
+    if (targets.empty()) return;
+    for (const auto &t : targets) {
+        if (!impl->kinematic.count(t.path)) throw std::runtime_error("Target is not a kinematic body: "+t.path);
+        for (double v : t.world) if (!std::isfinite(v)) throw std::runtime_error("Invalid kinematic target.");
+        for (double v : t.local) if (!std::isfinite(v)) throw std::runtime_error("Invalid local target.");
+    }
+    ++ordinal; // Only this control ordinal is drained; animation and physics output stay separate.
+    for (const auto &t : targets) {
+        writeLocal(impl->stage,ordinal,t.path,t.local);
+        auto world=t.world;
+        writeAttribute(impl->stage,ordinal,t.path,"omni:fabric:worldMatrix",world.data(),
+                       {kDLFloat,64,16},OVSTAGE_SEMANTIC_MATRIX);
+    }
+    impl->drain(ordinal); // CPU ovphysx converts transform edits to setKinematicTarget, not teleportation.
+}
+
 void PhysicsSimulation::step(ovstage_ordinal_t &ordinal)
 {
     check(ovphysx_step_sync(impl->handle, timeStep));

@@ -346,7 +346,16 @@ int wmain(int argc, wchar_t **argv)
                     if (ImGui::Checkbox("Show bone colliders", &show))
                         try { rtx.showBoneColliders(show); }
                         catch (const std::exception &e) { error = e.what(); }
-                    ImGui::Text("%zu static bone colliders", rtx.boneColliderCount());
+                    ImGui::Text("%zu kinematic bone bodies", rtx.boneColliderCount());
+                    if (ImGui::Button(rtx.animating() ? "Stop animation" : "Start animation")) {
+                        try {
+                            if (rtx.animating()) rtx.stopAnimation();
+                            else if (!renderFailed) rtx.startAnimation();
+                            error.clear();
+                        } catch (const std::exception &e) { error=e.what(); }
+                        accumulator=0;
+                        previousTime=glfwGetTime();
+                    }
                 }
                 if (ImGui::Button("Frame stage"))
                     frameScene(v);

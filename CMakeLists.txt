@@ -32,6 +32,8 @@ target_include_directories(fbik PUBLIC src/fbik)
 target_link_libraries(fbik PRIVATE stage_data PUBLIC ovstage::ovstage)
 
 add_library(viewer_core STATIC
+    src/viewer/Skinning.cpp
+    src/viewer/AnimationPlayer.cpp
     src/viewer/Camera.cpp
     src/viewer/StageCamera.cpp
     src/viewer/PhysicsSimulation.cpp

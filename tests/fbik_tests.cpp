@@ -1,4 +1,6 @@
 #include "Fbik.h"
+#include "AnimationPlayer.h"
+#include "Skinning.h"
 #include "PhysicsSimulation.h"
 #include <ovstage/ovstage_config.h>
 #include <ovphysx/ovphysx.h>
@@ -67,7 +69,7 @@ int main(int argc,char **argv)
             auto stats=module.init(scene.stage,scene.ordinal);
             require(stats.characters==2 && stats.skeletons==3,"Multiple characters/skeletons were not discovered");
             require(stats.boxes==1 && stats.capsules==3 && stats.leaves==6 && stats.degenerate==1,"Wrong OBB/capsule/leaf counts");
-            auto first=st::read(scene.stage,scene.ordinal,{"usd-prim-type","omni:fabric:worldMatrix","fbik:joint","height","radius","physics:rigidBodyEnabled"});
+            auto first=st::read(scene.stage,scene.ordinal,{"usd-prim-type","omni:fabric:worldMatrix","fbik:joint","height","radius","physics:kinematicEnabled"});
             const std::string a="/World/A/__FbikBoneColliders/Skeleton_0/";
             require(first.at(a+"Joint_0").at("usd-prim-type").token=="Cube","Skin OBB was not a box");
             require(first.at(a+"Joint_1").at("usd-prim-type").token=="Capsule","Non-leaf with End in its name was skipped");
@@ -84,11 +86,11 @@ int main(int argc,char **argv)
             for (const auto &[path,prim] : first)
                 if(path.find("__FbikBoneColliders")!=std::string::npos)
                 {
-                    auto it=prim.find("physics:rigidBodyEnabled");
-                    require(it==prim.end() || it->second.numbers.empty() || it->second.numbers[0]==0,"Collider is not static");
+                    auto it=prim.find("physics:kinematicEnabled");
+                    if (prim.count("fbik:joint")) require(it!=prim.end() && !it->second.numbers.empty() && it->second.numbers[0]==1,"Bone is not kinematic");
                 }
             auto repeat=module.init(scene.stage,scene.ordinal);
-            auto second=st::read(scene.stage,scene.ordinal,{"usd-prim-type","omni:fabric:worldMatrix","fbik:joint","height","radius","physics:rigidBodyEnabled"});
+            auto second=st::read(scene.stage,scene.ordinal,{"usd-prim-type","omni:fabric:worldMatrix","fbik:joint","height","radius","physics:kinematicEnabled"});
             require(repeat.boxes==stats.boxes && repeat.capsules==stats.capsules && second.size()==first.size(),"init created duplicates");
             module.showColliders(true,scene.ordinal);
             module.showColliders(false,scene.ordinal);
@@ -107,7 +109,7 @@ int main(int argc,char **argv)
             auto state=st::read(scene.stage,scene.ordinal,{"omni:fabric:worldMatrix"});
             const auto y=state.at("/World/Probe").at("omni:fabric:worldMatrix").numbers[13];
             std::cout << "Probe contacting generated collider at y=" << y << '\n';
-            require(y>.3 && y<2,"Dynamic probe did not collide with static bone box");
+            require(y>.3 && y<2,"Dynamic probe did not collide with kinematic bone box");
         }
         {
             Scene scene;scene.load(root/"resources/scenes/falling_box.usda");
@@ -120,9 +122,53 @@ int main(int argc,char **argv)
                     const auto &m=prim.at("omni:fabric:worldMatrix").numbers;
                     require(m.size()==16 && m[12]>0 && m[12]<4 && m[13]>-1 && m[13]<3,"SOMA collider outside expected character bounds");
                 }
+            const auto initial=st::read(scene.stage,scene.ordinal,{"omni:fabric:worldMatrix"});
+            viewer::Skinning skinning;skinning.init(scene.stage,scene.ordinal,module.characters());
+            skinning.update(viewer::sampleAnimation(scene.stage,scene.ordinal,0,module.characters()),scene.ordinal);
+            const std::string mesh="/World/Character/Soma/c_geometry_grp/MainMesh/Meshes/c_skin_mid";
+            const auto initialPoints=st::read(scene.stage,scene.ordinal,{"points"}).at(mesh).at("points").numbers;
+            double previousX=0;
+            for (int run=0;run<2;++run) {
+                viewer::PhysicsSimulation physics(scene.stage,scene.ordinal);
+                for (int frame=1;frame<=420;++frame) {
+                    auto poses=viewer::sampleAnimation(scene.stage,scene.ordinal,frame/60.0,module.characters());
+                    auto targets=module.updateTargets(poses);
+                    physics.setKinematicTargets(targets,scene.ordinal);
+                    physics.step(scene.ordinal);
+                    if (frame==180) {
+                        skinning.update(poses,scene.ordinal);
+                        const auto points=st::read(scene.stage,scene.ordinal,{"points"}).at(mesh).at("points").numbers;
+                        double difference=0;for(size_t i=0;i<points.size();++i) difference=std::max(difference,std::abs(points[i]-initialPoints[i]));
+                        require(difference>5,"Walk did not deform skin vertices in mesh space");
+                        const auto state=st::read(scene.stage,scene.ordinal,{"omni:fabric:worldMatrix"});
+                        for (const auto &target:targets) {
+                            const auto &actual=state.at(target.path).at("omni:fabric:worldMatrix").numbers;
+                            for (int axis=0;axis<16;++axis)
+                                require(std::abs(actual[axis]-target.world[axis])<.002,"Bone did not reach kinematic target");
+                        }
+                    }
+                }
+                auto state=st::read(scene.stage,scene.ordinal,{"omni:fabric:worldMatrix"});
+                const double x=state.at("/World/Box").at("omni:fabric:worldMatrix").numbers[12];
+                std::cout << "Walk run " << run << ": box x=" << x << '\n';
+                require(x<-.8,"Walking character did not push the cube away");
+                if(run) require(std::abs(x-previousX)<.01,"Animation restart is not repeatable");
+                previousX=x;
+                physics.stop(scene.ordinal);
+                skinning.update(viewer::sampleAnimation(scene.stage,scene.ordinal,0,module.characters()),scene.ordinal);
+                const auto restoredPoints=st::read(scene.stage,scene.ordinal,{"points"}).at(mesh).at("points").numbers;
+                for(size_t i=0;i<initialPoints.size();++i)
+                    require(std::abs(initialPoints[i]-restoredPoints[i])<.001,"Stop did not restore skin");
+                state=st::read(scene.stage,scene.ordinal,{"omni:fabric:worldMatrix"});
+                for (const auto &path : {"/World/Box", "/World/Character"}) {
+                    const auto &a=initial.at(path).at("omni:fabric:worldMatrix").numbers;
+                    const auto &b=state.at(path).at("omni:fabric:worldMatrix").numbers;
+                    for (size_t i=0;i<a.size();++i) require(std::abs(a[i]-b[i])<1e-6,"Animation stop did not reset scene");
+                }
+            }
             std::cout << "SOMA: " << stats.boxes << " boxes, " << stats.leaves << " leaves omitted\n";
         }
-        std::cout << "FBIK discovery, bindings, OBBs, fallback capsules, static collision and repeated init passed.\n";
+        std::cout << "FBIK discovery, bindings, OBBs, fallback capsules, kinematic collision, animation, skinning and repeated init passed.\n";
     }
     catch(const std::exception &e) { std::cerr << e.what() << '\n';code=1; }
     if(initialized) ovstage_shutdown();

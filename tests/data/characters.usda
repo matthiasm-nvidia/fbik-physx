@@ -1,0 +1,110 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def PhysicsScene "Physics" (
+        prepend apiSchemas = ["PhysxSceneAPI"]
+    )
+    {
+        vector3f physics:gravityDirection = (0, -1, 0)
+        float physics:gravityMagnitude = 9.81
+        custom token physxScene:broadphaseType = "MBP"
+        custom bool physxScene:enableGPUDynamics = 0
+    }
+
+    def SkelRoot "A"
+    {
+        float3 xformOp:scale = (2, 2, 2)
+        double3 xformOp:translate = (2, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+
+        def Skeleton "Rig"
+        {
+            uniform matrix4d[] bindTransforms = [( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ), ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1, 0, 1) ), ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 3, 0, 1) ), ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, -1, 0, 1) ), ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ), ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )]
+            uniform token[] joints = ["root", "root/branchEnd", "root/branchEnd/tip", "root/other", "root/zero", "root/zero/tip"]
+            uniform matrix4d[] restTransforms = [( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ), ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1, 0, 1) ), ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 2, 0, 1) ), ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, -1, 0, 1) ), ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ), ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )]
+            double3 xformOp:translate = (0.5, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+
+        def Mesh "Skin1" (
+            prepend apiSchemas = ["SkelBindingAPI"]
+        )
+        {
+            int[] faceVertexCounts = [3]
+            int[] faceVertexIndices = [0, 1, 2]
+            point3f[] points = [(0.02679492, -0.44641015, -0.1), (0.02679492, -0.44641015, 0.1), (-0.3732051, 0.24641016, -0.1), (-0.3732051, 0.24641016, 0.1), (0.3732051, -0.24641016, -0.1), (0.3732051, -0.24641016, 0.1), (-0.02679492, 0.44641015, -0.1), (-0.02679492, 0.44641015, 0.1)]
+            matrix4d primvars:skel:geomBindTransform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0.2, 0, 0, 1) )
+            int[] primvars:skel:jointIndices = [0, 1] (
+                elementSize = 2
+                interpolation = "vertex"
+            )
+            int[] primvars:skel:jointIndices:indices = [0, 0, 0, 0, 0, 0, 0, 0]
+            float[] primvars:skel:jointWeights = [0, 1] (
+                elementSize = 2
+                interpolation = "vertex"
+            )
+            int[] primvars:skel:jointWeights:indices = [0, 0, 0, 0, 0, 0, 0, 0]
+            uniform token[] skel:joints = ["root/other", "root"]
+            rel skel:skeleton = </World/A/Rig>
+        }
+
+        def Mesh "Skin2" (
+            prepend apiSchemas = ["SkelBindingAPI"]
+        )
+        {
+            int[] faceVertexCounts = [3]
+            int[] faceVertexIndices = [0, 1, 2]
+            point3f[] points = [(0.32679492, -0.44641015, -0.1), (0.32679492, -0.44641015, 0.1), (-0.07320508, 0.24641016, -0.1), (-0.07320508, 0.24641016, 0.1), (0.6732051, -0.24641016, -0.1), (0.6732051, -0.24641016, 0.1), (0.27320507, 0.44641015, -0.1), (0.27320507, 0.44641015, 0.1)]
+            matrix4d primvars:skel:geomBindTransform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0.2, 0, 0, 1) )
+            int[] primvars:skel:jointIndices = [0, 1] (
+                elementSize = 2
+                interpolation = "constant"
+            )
+            float[] primvars:skel:jointWeights = [0, 1] (
+                elementSize = 2
+                interpolation = "constant"
+            )
+            uniform token[] skel:joints = ["root/other", "root"]
+            rel skel:skeleton = </World/A/Rig>
+        }
+    }
+
+    def SkelRoot "B"
+    {
+        double3 xformOp:translate = (-2, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Skeleton "Rig"
+        {
+            uniform matrix4d[] bindTransforms = [( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ), ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (1, 1, 0, 1) ), ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-1, 3, 0, 1) )]
+            uniform token[] joints = ["start", "start/left", "start/right"]
+            uniform matrix4d[] restTransforms = [( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ), ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (1, 1, 0, 1) ), ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-1, 3, 0, 1) )]
+        }
+
+        def Skeleton "Rig2"
+        {
+            uniform matrix4d[] bindTransforms = [( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ), ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1, 0, 1) )]
+            uniform token[] joints = ["start", "start/tip"]
+            uniform matrix4d[] restTransforms = [( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ), ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1, 0, 1) )]
+            double3 xformOp:translate = (1, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+    }
+
+    def Cube "Probe" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        float physics:mass = 1
+        double size = 0.2
+        double3 xformOp:translate = (3.4, 4, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}
+

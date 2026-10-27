@@ -164,8 +164,10 @@ Snapshot read(ovstage_instance_t *stage, ovstage_ordinal_t ordinal, const std::v
                         {
                             const auto n = group.is_array ? t.shape[0] : 1;
                             for (int64_t k = 0; k < n; ++k)
-                                value.paths.push_back(
-                                    pathText(dict, valueAt<ovx_primpath_t>(t, group.is_array ? k : row, 0)));
+                            {
+                                const auto target = valueAt<ovx_primpath_t>(t, group.is_array ? k : row, 0);
+                                if (target) value.paths.push_back(pathText(dict, target));
+                            }
                         }
                         else if (t.dtype.code == kDLUInt && t.dtype.bits == 64)
                         {

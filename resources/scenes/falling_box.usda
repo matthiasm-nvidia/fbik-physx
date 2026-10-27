@@ -7,6 +7,20 @@
 )
 def Xform "World"
 {
+    # SOMA is authored in centimeters; this scene uses meters.
+    def Xform "Character"
+    {
+        double3 xformOp:translate = (2, 0, 0)
+        double3 xformOp:scale = (0.01, 0.01, 0.01)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+
+        def "Soma" (
+            prepend references = @soma.usd@</OUTPUT>
+        )
+        {
+        }
+    }
+
     def PhysicsScene "PhysicsScene" (
         prepend apiSchemas = ["PhysxSceneAPI"]
     )

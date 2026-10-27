@@ -6,7 +6,7 @@ Build a full-body pose correction system for animated characters using ovphysx f
 
 Scene objects and character bones will participate in the same PhysX simulation. PhysX will handle their collision detection and physical interaction. The first implementation will use PhysX joints for the character's constraints and animation tracking. A custom IK solver will be considered only if this approach cannot provide sufficient stability or the desired behavior.
 
-Status: the standalone viewer and initial ovphysx integration are implemented. The falling-box USD verifies gravity and contact; Start/Stop runs and resets the simulation. Character bodies, joints, animation tracking, and IK remain future work.
+Status: the standalone viewer and initial ovphysx integration are implemented. The falling-box USD verifies gravity and contact; Start/Stop runs and resets the simulation. Initial static character colliders are implemented; dynamic character bodies, joints, animation tracking, and IK remain future work.
 
 ## First step: minimal standalone viewer
 
@@ -108,7 +108,9 @@ Implemented with ovphysx 0.6.4, ovstage 0.2.1, and ovrtx 0.5.0. The shared ovsta
 
 ### 2. Build the physical character
 
-Create the character bodies, collision shapes, and native joints from the character definition. Verify frames, units, mass properties, joint limits, and self-collision filtering before adding animation tracking.
+The first pass is implemented behind `fbik::Module`: discover `SkelRoot` characters, fit static boxes to positively influenced skin vertices, and fall back to hierarchy-based capsules when no vertices are available. Leaf joints have no colliders, without altering the skeleton or using name conventions. A viewer checkbox displays the generated geometry. SOMA yields 61 boxes and 16 omitted leaves. Shapes use the initial evaluated pose and live in a replaceable in-memory USD layer.
+
+Next, create dynamic character bodies and native joints from this representation. Verify frames, units, mass properties, joint limits, and self-collision filtering before adding animation tracking.
 
 ### 3. Track animation with native joints
 

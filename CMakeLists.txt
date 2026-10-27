@@ -23,15 +23,22 @@ set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/glfw)
 find_package(OpenGL REQUIRED)
 
+add_library(stage_data STATIC src/viewer/StageData.cpp)
+target_include_directories(stage_data PUBLIC src/viewer)
+target_link_libraries(stage_data PUBLIC ovstage::ovstage)
+
+add_library(fbik STATIC src/fbik/Fbik.cpp src/fbik/MeshTools/Geometry.cpp)
+target_include_directories(fbik PUBLIC src/fbik)
+target_link_libraries(fbik PRIVATE stage_data PUBLIC ovstage::ovstage)
+
 add_library(viewer_core STATIC
     src/viewer/Camera.cpp
     src/viewer/StageCamera.cpp
-    src/viewer/StageData.cpp
     src/viewer/PhysicsSimulation.cpp
     src/viewer/RtxView.cpp
     src/viewer/RecentFiles.cpp)
 target_include_directories(viewer_core PUBLIC src/viewer)
-target_link_libraries(viewer_core PUBLIC ovstage::ovstage ovphysx::ovphysx ovrtx::ovrtx_static glfw OpenGL::GL)
+target_link_libraries(viewer_core PUBLIC fbik stage_data ovstage::ovstage ovphysx::ovphysx ovrtx::ovrtx_static glfw OpenGL::GL)
 
 add_library(viewer_ui STATIC
     src/viewer/viewer_imgui_theme.cpp
@@ -96,4 +103,12 @@ if(BUILD_TESTING)
     add_dependencies(physics_tests viewer_runtime)
     add_test(NAME physics COMMAND physics_tests "${CMAKE_CURRENT_SOURCE_DIR}")
     set_tests_properties(physics PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+endif()
+
+if(BUILD_TESTING)
+    add_executable(fbik_tests tests/fbik_tests.cpp)
+    target_link_libraries(fbik_tests PRIVATE viewer_core)
+    add_dependencies(fbik_tests viewer_runtime)
+    add_test(NAME fbik COMMAND fbik_tests "${CMAKE_CURRENT_SOURCE_DIR}")
+    set_tests_properties(fbik PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
 endif()

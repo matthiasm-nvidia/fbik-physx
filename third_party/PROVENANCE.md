@@ -21,3 +21,14 @@ ovstage and ovrtx are pinned in `dependencies.json` and installed under ignored
 `deps` directories with their distributed licenses and third-party notices.
 No animation, solver, collision, ragdoll, recording, or physics-demo implementation
 was imported.
+
+## Character geometry
+
+`src/fbik/MeshTools/Vec.h` is copied from `include/MeshTools/Vec.h` in
+`D:\GIT\mesh-tools-lib`, revision `49bb32a395fc2040d71126e2db755cca295f2cc6`.
+`Geometry.cpp` contains the point-cloud PCA OBB path extracted from
+`source/lib/MeshTools/Geometry.cpp`; `HeaderMath.h` contains its Jacobi/eigenvector
+helpers from `source/lib/MeshTools/utils/HeaderMath.h`. Surface fitting, convex
+optimization, and other unrelated geometry functions are excluded; temporary
+storage uses `std::vector`. The original NVIDIA source notices are retained.
+These files are bundled here and require no external source checkout.

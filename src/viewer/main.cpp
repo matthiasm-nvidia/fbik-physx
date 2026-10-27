@@ -340,6 +340,14 @@ int wmain(int argc, wchar_t **argv)
             if (rtx.loaded())
             {
                 ImGui::TextWrapped("%s", rtx.path().c_str());
+                if (rtx.boneColliderCount())
+                {
+                    bool show = rtx.boneCollidersVisible();
+                    if (ImGui::Checkbox("Show bone colliders", &show))
+                        try { rtx.showBoneColliders(show); }
+                        catch (const std::exception &e) { error = e.what(); }
+                    ImGui::Text("%zu static bone colliders", rtx.boneColliderCount());
+                }
                 if (ImGui::Button("Frame stage"))
                     frameScene(v);
                 if (ImGui::Button(rtx.simulating() ? "Stop simulation" : "Start simulation"))

@@ -1,5 +1,6 @@
 #include "RtxView.h"
 #include "PhysicsSimulation.h"
+#include "Fbik.h"
 #include "StageCamera.h"
 #include <algorithm>
 #include <array>
@@ -102,6 +103,9 @@ struct Scene
     std::optional<StageCamera> initialCamera;
     std::string path;
     std::unique_ptr<PhysicsSimulation> physics;
+    fbik::Module characterPhysics;
+    fbik::InitResult characterStats;
+    bool showBones = false;
     ~Scene()
     {
         physics.reset();
@@ -438,17 +442,21 @@ void RtxView::load(const std::string &path, int width, int height)
     ovstage_population_desc_t population{};
     population.domains = OVSTAGE_POPULATION_DOMAIN_ALL;
     std::vector<ovx_string_t> properties;
-    for (const auto *name : cameraAttributeNames)
-        properties.push_back(lit(name));
+    for (const auto *name : cameraAttributeNames) properties.push_back(lit(name));
+    for (const char *name : {"joints", "bindTransforms", "restTransforms", "translations", "rotations", "scales",
+             "points", "skel:skeleton", "skel:animationSource", "skel:joints", "primvars:skel:geomBindTransform",
+             "primvars:skel:jointIndices", "primvars:skel:jointWeights", "primvars:skel:jointIndices:indices",
+             "primvars:skel:jointWeights:indices", "primvars:skel:skinningMethod", "skel:blendShapeTargets",
+             "fbik:joint", "fbik:skeleton"}) properties.push_back(lit(name));
     const ovx_string_t primMetadata[] = {lit("instanceable")};
-    const ovx_string_t propertyMetadata[] = {lit("interpolation"), lit("bindMaterialAs")};
+    const ovx_string_t propertyMetadata[] = {lit("interpolation"), lit("bindMaterialAs"), lit("elementSize")};
     ovstage_population_selector_t selector{};
     selector.prim_predicate.kind = OVSTAGE_POPULATION_PRIM_PREDICATE_ALL;
     selector.property_predicate = ovstage_population_property_predicate_has_name(properties.data(), properties.size());
     selector.prim_metadata_paths = primMetadata;
     selector.prim_metadata_path_count = 1;
     selector.property_metadata_paths = propertyMetadata;
-    selector.property_metadata_path_count = 2;
+    selector.property_metadata_path_count = 3;
     population.selectors = &selector;
     population.selector_count = 1;
     population.stage_metadata_paths = metadata;
@@ -461,6 +469,10 @@ void RtxView::load(const std::string &path, int width, int height)
                                         candidate->ordinal, candidate->ordinal + 1));
     ++candidate->ordinal;
     candidate->seal();
+    candidate->characterStats = candidate->characterPhysics.init(candidate->stage, candidate->ordinal);
+    const auto &stats = candidate->characterStats;
+    std::printf("FBIK: %zu characters, %zu skeletons, %zu boxes, %zu capsules, %zu leaves skipped, %zu degenerate segments skipped\n",
+                stats.characters, stats.skeletons, stats.boxes, stats.capsules, stats.leaves, stats.degenerate);
     frameBounds(*candidate);
     candidate->initialCamera = readStageCamera(candidate->stage, candidate->ordinal);
     if (candidate->initialCamera)
@@ -566,6 +578,7 @@ void RtxView::render(const Camera &camera, int width, int height)
         }
         scene.seal();
         stage::hierarchy(scene.stage, scene.ordinal);
+        if (lensChanged && scene.showBones) scene.characterPhysics.showColliders(true, scene.ordinal);
         if (resized)
             rtxWait(impl->renderer, ovrtx_update_from_stage(impl->renderer, scene.ordinal));
         impl->lastCamera = matrix;
@@ -677,6 +690,18 @@ void RtxView::endDrag()
 bool RtxView::dragging() const
 {
     return simulating() && impl->scene->physics->dragging();
+}
+
+size_t RtxView::boneColliderCount() const
+{
+    return impl->scene ? impl->scene->characterStats.boxes + impl->scene->characterStats.capsules : 0;
+}
+bool RtxView::boneCollidersVisible() const { return impl->scene && impl->scene->showBones; }
+void RtxView::showBoneColliders(bool visible)
+{
+    if (!impl->scene) return;
+    impl->scene->characterPhysics.showColliders(visible, impl->scene->ordinal);
+    impl->scene->showBones = visible;
 }
 
 bool RtxView::loaded() const

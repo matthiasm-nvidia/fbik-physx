@@ -27,6 +27,9 @@ class RtxView
     void moveDrag(const Camera::Ray &ray);
     void endDrag();
     bool dragging() const;
+    size_t boneColliderCount() const;
+    bool boneCollidersVisible() const;
+    void showBoneColliders(bool visible);
     bool loaded() const;
     const std::vector<uint8_t> &pixels() const;
     int width() const;

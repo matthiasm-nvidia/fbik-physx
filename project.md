@@ -1,0 +1,142 @@
+# FBIK with ovphysx
+
+## Purpose
+
+Build a full-body pose correction system for animated characters using ovphysx for most of the physics simulation. The character should follow its animation while responding to environment collisions, self-collisions, and joint limits.
+
+Scene objects and character bones will participate in the same PhysX simulation. PhysX will handle their collision detection and physical interaction. The first implementation will use PhysX joints for the character's constraints and animation tracking. A custom IK solver will be considered only if this approach cannot provide sufficient stability or the desired behavior.
+
+Status: the minimal standalone viewer is implemented. Physics and IK remain future work.
+
+## First step: minimal standalone viewer
+
+Create a self-contained viewer by stripping down the existing FBIK repository.
+Keep OpenGL/GLFW presentation, ImGui with the same styling wrapper and fonts,
+ovrtx rendering, ovstage USD loading, and the existing `build.bat` discovery and
+Debug/Release build logic. Provide a native USD file picker and persistent recent
+USD files that can be selected to load.
+
+This step includes only the viewer and its necessary dependencies. Do not import
+or implement animation, skinning, IK, physics simulation, recording, or demo
+features. Preserve the assets already present in this project. The ovphysx
+milestones below follow this foundation.
+
+## Agreed direction
+
+- Use ovphysx as the integration layer for PhysX simulation.
+- Simulate the environment and its dynamic objects with PhysX.
+- Represent character bones as PhysX bodies with collision shapes and mass properties.
+- Use PhysX joints first to connect the bones, constrain their motion, and support tracking of the animation pose.
+- Let character bodies interact with scene objects through the shared simulation.
+- Support character self-collision, with collision filtering for connected or intentionally overlapping bodies.
+- Evaluate the native joint approach before deciding whether a custom IK solver is necessary.
+- Retain PhysX scene simulation and collision handling if custom IK is introduced.
+
+## Reference project
+
+The existing project at `D:\git\fbik` is the reference for character setup, animation integration, and expected behavior.
+
+Relevant components include:
+
+- Humanoid recognition and mapping between animation joints and physics bodies.
+- The reference character physics asset, including body shapes, joint frames, limits, mass, and inertia.
+- USD skeleton and animation loading, corrected-pose writeback, CPU skinning, and the RTX viewer.
+- Animation tracking, contact response, ragdoll behavior, and diagnostics.
+- Test scenes and recorded investigations of unstable contact behavior.
+
+The reference currently includes both a quasi-static rotation-based solver and a custom rigid-body simulation with compliant animation drives. This project will use that work to guide behavior and integration while assigning physics simulation to ovphysx.
+
+## Intended architecture
+
+### Scene simulation
+
+ovphysx will own the shared simulation containing static environment geometry, dynamic scene objects, and character bodies. Collision filtering and physical properties must be configured so contacts produce the intended interaction between them.
+
+The concrete ovphysx interfaces for creating bodies, shapes, joints, and drives must be checked during implementation planning. This document does not assume that every underlying PhysX feature is exposed through ovphysx.
+
+### Character representation
+
+Each simulated bone will have a rigid body and collision geometry. A mapping will relate its physics transform to the corresponding animation joint, including any offset between the joint and body frames. Bones used only for rendering will retain their relationship to the corrected skeleton.
+
+Connected bodies will use joints with appropriate attachment frames and angular limits. Mass and inertia should allow character bodies and scene objects to respond to each other. Policies for the root and feet must be explicit because fixed targets can conflict with collision constraints.
+
+### Animation tracking and IK
+
+The original animation supplies the desired pose. The first approach will use PhysX joints and the available drive mechanisms to pull the character toward that pose while contacts and limits constrain the result.
+
+Here, IK means correcting an animated pose through the jointed physical character. A separate end-effector IK API is not an initial requirement.
+
+Original animation targets and simulated output must remain separate. Corrected output must not become the next animation target unintentionally.
+
+### Frame flow
+
+1. Sample the original animation and character placement.
+2. Convert animation transforms into physics body or joint targets.
+3. Advance the shared PhysX simulation, resolving character constraints and scene contacts.
+4. Read the resulting character body transforms.
+5. Reconstruct the corrected skeleton pose and skin the character for rendering.
+
+Simulation must have a clearly defined timestep and a single owner of time advancement. Target updates, substeps, paused animation, and paused simulation must have explicit behavior.
+
+### Custom IK fallback
+
+If the native joint approach remains unstable or cannot meet the required behavior, introduce a custom solver for the character constraints or pose correction that need it.
+
+Before implementing that fallback, define when it runs relative to PhysX simulation, how it consumes contact information, and how its corrections affect body poses and velocities. Its output must cooperate with PhysX contact resolution and preserve meaningful interaction with dynamic objects.
+
+The decision should follow reproducible failures of the native approach and measured attempts to address them through setup, timestep, drives, and solver settings.
+
+## Behavior to establish
+
+- In free space, the character tracks its animated pose with acceptable error.
+- Static obstacles cause the body to yield while respecting the configured joint limits.
+- Dynamic objects can displace movable character bodies, and the character can move those objects.
+- Self-collisions prevent unwanted overlap without forcing adjacent bodies apart at their joints.
+- After contact ends, the character returns toward the animation without sustained oscillation or abrupt snapping.
+- Holding the animation pose still allows physics interaction and recovery while simulation continues.
+- Pausing simulation freezes the simulated state.
+- Different rendering rates produce comparable behavior at the same physics timestep.
+- Conflicting targets or constraints produce visible diagnostics rather than being treated as a successful solve.
+
+## Implementation milestones
+
+### 1. Verify ovphysx integration
+
+Confirm the available interfaces and build requirements. Establish a minimal scene with static geometry and a dynamic object, and verify stepping and transform readback.
+
+### 2. Build the physical character
+
+Create the character bodies, collision shapes, and native joints from the character definition. Verify frames, units, mass properties, joint limits, and self-collision filtering before adding animation tracking.
+
+### 3. Track animation with native joints
+
+Connect sampled animation targets to the available joint drives. Implement pose reconstruction and assess tracking error, attachment error, and recovery behavior in free space.
+
+### 4. Evaluate coupled interaction
+
+Test static obstacles, self-contact, sustained loads, and impacts from dynamic objects. Compare stiffness, damping, timestep, and solver settings using repeatable scenes. Include cases with conflicting root or foot targets once their policy is chosen.
+
+### 5. Decide whether custom IK is needed
+
+Document the remaining failures and the limits of the native approach. Continue with PhysX joints if they meet the requirements. Otherwise, define and test a narrowly scoped custom solver integration while retaining PhysX simulation for the scene.
+
+## Validation and diagnostics
+
+Use small controlled tests alongside the animated humanoid scene. Measure animation tracking error, joint attachment error, joint-limit violations, penetration, pose changes between frames, and unexpected velocity spikes. Record the timestep and solver settings with each comparison.
+
+Initial test cases should include a free-space animated chain, a limb against a static obstacle, character self-contact, a dynamic object pressing against a held pose, an impact followed by recovery, and a walking character encountering obstacles.
+
+Set numerical acceptance thresholds after establishing scene scale and a baseline. Visual inspection alone is insufficient to establish stability, and low penetration alone is insufficient if the pose visibly oscillates.
+
+## Open decisions
+
+- Which ovphysx body, joint, and drive interfaces will be used?
+- Which parts of the existing viewer and animation adapter should be reused?
+- What joint types and drive formulation best express the animation targets?
+- Should joint limits remain authored, or expand from original animation as in the reference project?
+- How should root placement and foot targets constrain the physical character?
+- How should independent body transforms be written back while preserving skeletal attachment and bone-length requirements?
+- What timestep, substep policy, and target interpolation should be used?
+- What measured failures would justify introducing custom IK?
+
+The immediate priority is to validate the PhysX-joint approach. Whole-character locomotion planning, automatic foot placement, and get-up behavior are outside the initial scope.

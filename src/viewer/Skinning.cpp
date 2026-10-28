@@ -19,6 +19,7 @@ void write(ovstage_instance_t *s, ovstage_query_handle_t query, ovstage_ordinal_
 struct Skinning::Impl {
     ovstage_instance_t *stage=nullptr;
     ovx_token_t vertexToken=0;
+    stage::Query transforms;
     struct Mesh {
         std::string path,skeleton;
         ovstage_query_handle_t query{};
@@ -28,6 +29,8 @@ struct Skinning::Impl {
         std::vector<size_t> indices,triangles;
         std::vector<double> weights;
         std::vector<Matrix> bind; // inverse joint bind * geometry bind
+        std::vector<Matrix> transforms;
+        std::vector<Vec3> deformed, normals;
     };
     std::vector<Mesh> meshes;
 };
@@ -85,19 +88,23 @@ void Skinning::init(ovstage_instance_t *s,ovstage_ordinal_t ordinal,const std::v
         stage::wait(s,ovstage_query(s,&filter,nullptr,0,&mesh.query));
         impl->meshes.push_back(std::move(mesh));
     }
+    std::vector<std::string> paths;
+    for (const auto &mesh : impl->meshes) paths.push_back(mesh.path);
+    impl->transforms.init(s, paths, {"omni:fabric:worldMatrix"});
 }
 void Skinning::update(const std::vector<fbik::Pose> &poses,ovstage_ordinal_t &ordinal)
 {
     if(impl->meshes.empty()) return;
-    const auto data=stage::read(impl->stage,ordinal,{"omni:fabric:worldMatrix"});
+    const auto data=impl->transforms.read(ordinal);
     ++ordinal;
-    for(const auto &mesh:impl->meshes) {
+    for(auto &mesh:impl->meshes) {
         auto pose=std::find_if(poses.begin(),poses.end(),[&](const auto &p){return p.skeletonPath==mesh.skeleton;});
         require(pose!=poses.end(),"Missing skin pose.");
         const auto toMesh=inverse(world(data.at(mesh.path)))*unpacked(pose->characterWorld);
-        std::vector<Matrix> transforms;
+        auto &transforms = mesh.transforms; transforms.clear();
         for(size_t j=0;j<mesh.bind.size();++j) transforms.push_back(toMesh*unpacked(pose->bones[j])*mesh.bind[j]);
-        std::vector<Vec3> points(mesh.points.size(),Vec3(Zero)),normals(mesh.points.size(),Vec3(Zero));
+        auto &points = mesh.deformed; auto &normals = mesh.normals;
+        points.assign(mesh.points.size(),Vec3(Zero)); normals.assign(mesh.points.size(),Vec3(Zero));
         for(size_t v=0;v<points.size();++v) {
             double total=0;
             for(size_t j=0;j<mesh.influences;++j) {

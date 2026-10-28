@@ -6,7 +6,7 @@ Build a full-body pose correction system for animated characters using ovphysx f
 
 Scene objects and character bones will participate in the same PhysX simulation. PhysX will handle their collision detection and physical interaction. The first implementation will use PhysX joints for the character's constraints and animation tracking. A custom IK solver will be considered only if this approach cannot provide sufficient stability or the desired behavior.
 
-Status: the standalone viewer and initial ovphysx integration are implemented. The falling-box USD verifies gravity and contact; Start/Stop runs and resets the simulation. Kinematic character bodies, USD animation playback, and viewer-side skinning are implemented. A procedural SOMA walk pushes the cube. Dynamic character bodies, joints, animation drives, and IK remain future work.
+Status: the standalone viewer and initial ovphysx integration are implemented. The falling-box USD verifies gravity and contact; Start/Stop runs and resets the simulation. Kinematic character bodies, USD animation playback, and viewer-side skinning are implemented. A procedural SOMA walk pushes the cube. Follow/ragdoll mode switching, dynamic character bodies, unrestricted spherical joints, bone collision filtering, and physics-to-skin pose reconstruction are implemented. Animation drives, angular limits, and IK remain future work.
 
 ## First step: minimal standalone viewer
 
@@ -104,13 +104,13 @@ The decision should follow reproducible failures of the native approach and meas
 
 Implemented with ovphysx 0.6.4, ovstage 0.2.1, and ovrtx 0.5.0. The shared ovstage is populated with physics and rendering data after registering the bundled PhysX schemas. Simulation uses fixed 1/60 second steps, publishes body transforms, converts them to local transforms, and recomputes the hierarchy for child geometry. Simulation output ordinals are never drained back into physics.
 
-`resources/scenes/falling_box.usda` contains a static ground slab and a dynamic 1 kg box. The viewer's Start simulation button changes to Stop simulation. Stop restores the starting transforms and destroys the physics instance so restarting clears velocities and contacts. Tests cover gravity, settling, child geometry, exact reset, repeatability, and visible RTX motion/reset. Mouse picking uses an in-memory D6 joint with translation spring/damper drives and free rotation. The hit point remains body-local; the world anchor follows the cursor at the initial ray distance. Joint controls use isolated input ordinals, and release, focus loss, Stop, or scene replacement clears the drag. Tests verify picking, lift, collision resistance, release, repeat grabs, and rendered motion. Point-instanced body writeback is outside this milestone.
+`resources/scenes/falling_box.usda` contains a static ground slab and a dynamic 1 kg box with 10 cm sides. The viewer's Start simulation button changes to Stop simulation. Stop restores the starting transforms and destroys the physics instance so restarting clears velocities and contacts. Tests cover gravity, settling, child geometry, exact reset, repeatability, and visible RTX motion/reset. Mouse picking uses an in-memory D6 joint with translation spring/damper drives and free rotation. The hit point remains body-local; the world anchor follows the cursor at the initial ray distance. Joint controls use isolated input ordinals, and release, focus loss, Stop, or scene replacement clears the drag. Tests verify picking, lift, collision resistance, release, repeat grabs, and rendered motion. Point-instanced body writeback is outside this milestone.
 
 ### 2. Build the physical character
 
 The first pass is implemented behind `fbik::Module`: discover `SkelRoot` characters, fit OBBs to skin vertices whose weight for that bone is strictly above 0.3 and refine them with 64 support-plane cuts into convex mesh colliders, and fall back to hierarchy-based capsules when no vertices are available. Leaf joints have no colliders, without altering the skeleton or using name conventions. A viewer checkbox displays the generated geometry. SOMA yields 61 convex meshes and 16 omitted leaves. Shapes are fitted in the initial evaluated pose and live in a replaceable in-memory USD layer. They now have kinematic rigid-body APIs and follow evaluated bone poses through fixed offsets.
 
-Next, create dynamic character bodies and native joints from this representation. Verify frames, units, mass properties, joint limits, and self-collision filtering before adding animation tracking.
+Ragdoll mode now makes the bodies dynamic and enables spherical joints anchored at the skeleton bone bases. All rotation axes are free. Root bodies remain unanchored, and a collision group filters all generated bone-to-bone contacts while preserving environment contact. Physics poses reconstruct the visible skeleton, retaining local poses for omitted bones. Follow remains kinematic. Mode changes preserve the current release pose; returning to Follow snaps to the held animation pose. Next, add angular limits and animation drives.
 
 ### 2a. Kinematic walking collision test — implemented
 
@@ -121,12 +121,12 @@ paths and joint ordering; `updateTargets(poses)` accepts a world character trans
 and character-space bone matrices and returns local/world body targets. FBIK never
 samples animation or steps the solver. The physics module submits a dedicated
 ovstage control ordinal before stepping; CPU ovphysx turns these edits into native
-kinematic targets. Bone dimensions and offsets are fixed after initialization.
+kinematic targets. Bone dimensions and offsets are fixed after initialization. Cached ordered queries batch all body targets in one local/world write. Animation sampling caches static skeleton metadata; physics output, ragdoll pose reconstruction, and CPU skinning are deferred until a frame or a control operation needs them. Intermediate physics ticks do not publish to the stage, and output is never drained back as input. Query lifetimes are bounded by their owning stage.
 
-The sample references `soma_walk.usda`, a generated procedural gait, and separately
-authors character translation toward the cube. Start/Stop animation resumes/pauses
-playback only while the shared simulation is running; stopping animation holds the
-character pose while physics continues. Stop simulation restores the initial scene,
+The `basic_walk.usda` sample references `soma_walk.usda`, a generated procedural gait, and separately
+authors character translation toward the box. Animation stays paused on load and
+reset until Play animation is clicked; that button also starts physics if needed.
+Pause animation holds the character pose while physics continues. Stop simulation restores the initial scene,
 skin, and animation time. The clip holds its final pose rather than looping root motion.
 Tests cover body target tracking, skin deformation/reset, cube displacement, repeatable
 restarts, and visible RTX motion. This is one-way kinematic contact: the cube responds,

@@ -126,10 +126,6 @@ void writeAttribute(ovstage_instance_t *s, ovstage_ordinal_t ordinal, const std:
     catch (...) { ovstage_release_query(s, query); throw; }
     ovstage_release_query(s, query);
 }
-void writeLocal(ovstage_instance_t *s, ovstage_ordinal_t ordinal, const std::string &path, Matrix value)
-{
-    writeAttribute(s, ordinal, path, "omni:xform", value.data(), {kDLFloat, 64, 16}, OVSTAGE_SEMANTIC_MATRIX);
-}
 } // namespace
 
 PhysicsRuntime::PhysicsRuntime()
@@ -154,9 +150,12 @@ struct PhysicsSimulation::Impl
     std::map<std::string, Matrix> initial;
     std::map<std::string, Matrix> childLocals;
     std::set<std::string> kinematic;
+    stage::Query targetsQuery, localsQuery, transformsQuery;
+    std::vector<std::string> targetPaths;
+    std::vector<Matrix> targetLocals, targetWorlds, localTransforms;
     std::string jointPath;
     ovstage_population_usd_reference_handle_t jointLayer{};
-    bool hasJointLayer = false, activeDrag = false, stepped = false;
+    bool hasJointLayer = false, activeDrag = false, stepped = false, pendingOutput = false;
     float dragDepth = 0;
     Vec3 target{0, 0, 0};
     void drain(ovstage_ordinal_t ordinal)
@@ -200,12 +199,33 @@ PhysicsSimulation::PhysicsSimulation(ovstage_instance_t *s, ovstage_ordinal_t or
                 { impl->childLocals.emplace(path, matrix(prim, "omni:xform")); break; }
     if (impl->initial.empty())
         throw std::runtime_error("This USD contains no enabled rigid bodies to simulate.");
+    std::vector<std::string> localPaths;
+    std::set<std::string> readPaths;
+    for (const auto &[path, value] : impl->initial) {
+        localPaths.push_back(path);
+        for (auto ancestor = path; !ancestor.empty(); ancestor = ancestor.substr(0, ancestor.find_last_of('/')))
+            if (snapshot.count(ancestor)) readPaths.insert(ancestor);
+    }
+    for (const auto &[path, value] : impl->childLocals) localPaths.push_back(path);
+    impl->localsQuery.init(s, localPaths);
+    impl->transformsQuery.init(s, {readPaths.begin(), readPaths.end()},
+                              {"omni:xform", "omni:fabric:worldMatrix", "omni:resetXformStack"});
+    impl->localTransforms.reserve(localPaths.size());
     ovphysx_create_args args = OVPHYSX_CREATE_ARGS_DEFAULT;
     check(ovphysx_create_instance(&args, &impl->handle));
     check(ovphysx_attach_ovstage(impl->handle, s, ordinal));
     impl->cache = std::make_unique<ovphysx::utils::OvStageOutputCache>();
 }
 PhysicsSimulation::~PhysicsSimulation() = default;
+
+void PhysicsSimulation::applyControlChanges(ovstage_ordinal_t ordinal)
+{
+    impl->drain(ordinal);
+    const auto snapshot=stage::read(impl->stage,ordinal,{"physics:kinematicEnabled"});
+    impl->kinematic.clear();
+    for (const auto &[path,prim]:snapshot)
+        if (flag(prim,"physics:kinematicEnabled")) impl->kinematic.insert(path);
+}
 
 void PhysicsSimulation::setKinematicTargets(const std::vector<fbik::BodyTarget> &targets, ovstage_ordinal_t &ordinal)
 {
@@ -215,20 +235,34 @@ void PhysicsSimulation::setKinematicTargets(const std::vector<fbik::BodyTarget> 
         for (double v : t.world) if (!std::isfinite(v)) throw std::runtime_error("Invalid kinematic target.");
         for (double v : t.local) if (!std::isfinite(v)) throw std::runtime_error("Invalid local target.");
     }
-    ++ordinal; // Only this control ordinal is drained; animation and physics output stay separate.
-    for (const auto &t : targets) {
-        writeLocal(impl->stage,ordinal,t.path,t.local);
-        auto world=t.world;
-        writeAttribute(impl->stage,ordinal,t.path,"omni:fabric:worldMatrix",world.data(),
-                       {kDLFloat,64,16},OVSTAGE_SEMANTIC_MATRIX);
+    std::vector<std::string> paths;
+    paths.reserve(targets.size());
+    for (const auto &t : targets) paths.push_back(t.path);
+    if (paths != impl->targetPaths) {
+        impl->targetsQuery.init(impl->stage, paths);
+        impl->targetPaths = std::move(paths);
     }
+    impl->targetLocals.clear(); impl->targetWorlds.clear();
+    for (const auto &t : targets) {
+        impl->targetLocals.push_back(t.local);
+        impl->targetWorlds.push_back(t.world);
+    }
+    ++ordinal; // Only this control ordinal is drained; animation and physics output stay separate.
+    impl->targetsQuery.writeTransforms(ordinal, impl->targetLocals, &impl->targetWorlds);
     impl->drain(ordinal); // CPU ovphysx converts transform edits to setKinematicTarget, not teleportation.
 }
 
-void PhysicsSimulation::step(ovstage_ordinal_t &ordinal)
+void PhysicsSimulation::step(ovstage_ordinal_t &ordinal, bool publishOutput)
 {
     check(ovphysx_step_sync(impl->handle, timeStep));
     impl->stepped = true;
+    impl->pendingOutput = true;
+    if (publishOutput) publish(ordinal);
+}
+
+void PhysicsSimulation::publish(ovstage_ordinal_t &ordinal)
+{
+    if (!impl->pendingOutput) return;
     const auto output = ovphysx::utils::writeWorldTransformsToOvstage(impl->handle, impl->stage, ++ordinal, impl->cache.get());
     // Even partial output must be sealed before recovery writes.
     stage::seal(impl->stage, ordinal);
@@ -238,8 +272,7 @@ void PhysicsSimulation::step(ovstage_ordinal_t &ordinal)
 
     // Convert body world poses to local transforms so hierarchy updates propagate
     // them to child meshes and camera movement cannot overwrite simulation output.
-    const auto snapshot = stage::read(impl->stage, ordinal,
-        {"omni:xform", "omni:fabric:worldMatrix", "omni:resetXformStack"});
+    const auto snapshot = impl->transformsQuery.read(ordinal);
     std::map<std::string, Matrix> worlds;
     std::function<Matrix(const std::string &)> world = [&](const std::string &path) -> Matrix {
         if (path.empty() || path == "/") return identity;
@@ -255,16 +288,19 @@ void PhysicsSimulation::step(ovstage_ordinal_t &ordinal)
         return worlds[path] = value;
     };
     ++ordinal;
+    impl->localTransforms.clear();
     for (const auto &[path, initial] : impl->initial)
     {
         const auto &prim = snapshot.at(path);
         const auto parent = flag(prim, "omni:resetXformStack") ? identity : world(path.substr(0, path.find_last_of('/')));
-        writeLocal(impl->stage, ordinal, path, multiply(world(path), inverse(parent)));
+        impl->localTransforms.push_back(multiply(world(path), inverse(parent)));
     }
     for (const auto &[path, local] : impl->childLocals)
-        writeLocal(impl->stage, ordinal, path, local);
+        impl->localTransforms.push_back(local);
+    impl->localsQuery.writeTransforms(ordinal, impl->localTransforms);
     stage::seal(impl->stage, ordinal);
     stage::hierarchy(impl->stage, ordinal);
+    impl->pendingOutput = false;
     // No output ordinal is ever passed to ovphysx_update_from_ovstage.
 }
 
@@ -280,21 +316,31 @@ void PhysicsSimulation::stop(ovstage_ordinal_t &ordinal)
         stage::seal(impl->stage, ordinal);
     }
     ++ordinal;
+    impl->localTransforms.clear();
     for (const auto &[path, initial] : impl->initial)
-        writeLocal(impl->stage, ordinal, path, initial);
+        impl->localTransforms.push_back(initial);
     for (const auto &[path, local] : impl->childLocals)
-        writeLocal(impl->stage, ordinal, path, local);
+        impl->localTransforms.push_back(local);
+    impl->localsQuery.writeTransforms(ordinal, impl->localTransforms);
+    impl->pendingOutput = false;
     stage::seal(impl->stage, ordinal);
     stage::hierarchy(impl->stage, ordinal);
 }
 
 bool PhysicsSimulation::beginDrag(Vec3 origin, Vec3 direction, ovstage_ordinal_t &ordinal)
 {
+    publish(ordinal);
     endDrag(ordinal);
-    if (!impl->stepped) return false; // Scene-query objects exist after the first completed step.
     direction = normalized(direction);
     if (!std::isfinite(origin.x) || !std::isfinite(origin.y) || !std::isfinite(origin.z))
         throw std::runtime_error("Invalid picking ray origin.");
+    if (!impl->stepped)
+    {
+        // ovphysx creates queryable objects on the first step. Warm up with the
+        // same minimal timestep used by its tensor bindings, preserving the visible pose.
+        check(ovphysx_step_sync(impl->handle, 1e-9f));
+        impl->stepped = true;
+    }
     const float from[] = {origin.x, origin.y, origin.z}, ray[] = {direction.x, direction.y, direction.z};
     const ovphysx_scene_query_hit_t *hits = nullptr;
     uint32_t count = 0;

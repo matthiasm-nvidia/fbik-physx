@@ -47,7 +47,7 @@ for frame in range(0,481,2):
 walk.SetDefaultPrim(a.GetPrim())
 walk.GetRootLayer().Export(str(root/'resources/scenes/soma_walk.usda'))
 # Scene placement is kept separate from the reusable skeletal clip.
-p=root/'resources/scenes/falling_box.usda'
+p=root/'resources/scenes/basic_walk.usda'
 s=p.read_text()
 s=s.replace('    upAxis = "Y"','    upAxis = "Y"\n    startTimeCode = 0\n    endTimeCode = 480\n    timeCodesPerSecond = 60')
 s=s.replace('        double3 xformOp:scale', '''        double3 xformOp:translate.timeSamples = {

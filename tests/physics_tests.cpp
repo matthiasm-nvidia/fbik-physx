@@ -55,7 +55,14 @@ int main(int argc, char **argv)
             return viewer::stage::read(stage, ordinal, {"omni:xform", "omni:fabric:worldMatrix"});
         };
         const auto initial = pose();
-        require(std::abs(initial.at("/World/Box").at("omni:fabric:worldMatrix").numbers[13] - 4) < 1e-8, "Initial height");
+        require(std::abs(initial.at("/World/Box").at("omni:fabric:worldMatrix").numbers[13] - 1) < 1e-8, "Initial height");
+        {
+            viewer::PhysicsSimulation simulation(stage, ordinal);
+            require(simulation.beginDrag({0, 1, 6}, {0, 0, -1}, ordinal), "Could not pick before the first physics step");
+            require(pose().at("/World/Box").at("omni:fabric:worldMatrix").numbers ==
+                    initial.at("/World/Box").at("omni:fabric:worldMatrix").numbers, "Picking advanced the visible pose");
+            simulation.stop(ordinal);
+        }
         std::vector<double> trajectory;
         for (int run = 0; run < 2; ++run)
         {
@@ -71,11 +78,11 @@ int main(int argc, char **argv)
                         "Child geometry did not follow the rigid body");
                 require(state.at("/World/Ground").at("omni:fabric:worldMatrix").numbers ==
                         initial.at("/World/Ground").at("omni:fabric:worldMatrix").numbers, "Static ground moved");
-                if (i == 20) require(height < 3.8 && height > 2, "Box did not fall under gravity");
+                if (i == 20) require(height < 0.5 && height > 0.2, "Box did not fall under gravity");
                 if (i == 179)
                 {
                     std::cout << "Resting height: " << height << '\n';
-                    require(std::abs(height - 0.5) < 0.03, "Box did not settle on ground");
+                    require(std::abs(height - 0.05) < 0.01, "Box did not settle on ground");
                 }
             }
             simulation.stop(ordinal);
@@ -86,13 +93,23 @@ int main(int argc, char **argv)
         }
         {
             viewer::PhysicsSimulation simulation(stage, ordinal);
-            for (int i = 0; i < 180; ++i) simulation.step(ordinal);
-            require(!simulation.beginDrag({5, 3, 0}, {0, -1, 0}, ordinal), "Static ground was draggable");
+            for (int i = 0; i < 180; ++i) {
+                simulation.step(ordinal, false);
+                if (i % 6 == 5) {
+                    simulation.publish(ordinal);
+                    require(std::abs(pose().at("/World/Box").at("omni:fabric:worldMatrix").numbers[13]-trajectory[i])<1e-5,
+                            "Deferred publication changed the simulated trajectory");
+                    const auto published=ordinal;
+                    simulation.publish(ordinal);
+                    require(ordinal==published,"Publishing unchanged physics rewrote the stage");
+                }
+            }
+            require(!simulation.beginDrag({0.3f, 3, 0}, {0, -1, 0}, ordinal), "Static ground was draggable");
             require(!simulation.beginDrag({20, 3, 0}, {0, 1, 0}, ordinal), "Empty ray picked a body");
-            require(simulation.beginDrag({0, 0.5f, 6}, {0, 0, -1}, ordinal), "Could not pick resting box");
+            require(simulation.beginDrag({0, 0.05f, 6}, {0, 0, -1}, ordinal), "Could not pick resting box");
             simulation.moveDrag({0, -3, 6}, {0, 0, -1}, ordinal);
             for (int i = 0; i < 60; ++i) simulation.step(ordinal);
-            require(pose().at("/World/Box").at("omni:fabric:worldMatrix").numbers[13] > 0.3,
+            require(pose().at("/World/Box").at("omni:fabric:worldMatrix").numbers[13] > 0.02,
                     "Dragging bypassed ground collision");
             simulation.moveDrag({0, 3.5f, 6}, {0, 0, -1}, ordinal);
             for (int i = 0; i < 180; ++i) simulation.step(ordinal);
@@ -102,7 +119,8 @@ int main(int argc, char **argv)
             simulation.endDrag(ordinal);
             require(!simulation.dragging(), "Release did not end drag");
             for (int i = 0; i < 180; ++i) simulation.step(ordinal);
-            require(pose().at("/World/Box").at("omni:fabric:worldMatrix").numbers[13] < 0.9, "Released box stayed pinned");
+            require(std::abs(pose().at("/World/Box").at("omni:fabric:worldMatrix").numbers[13] - 0.05) < 0.03,
+                    "Released box did not settle on ground");
             const auto resting = pose().at("/World/Box").at("omni:fabric:worldMatrix").numbers;
             require(simulation.beginDrag({float(resting[12]), float(resting[13]), 6}, {0, 0, -1}, ordinal), "Second grab failed");
             simulation.stop(ordinal);

@@ -1,5 +1,6 @@
 #pragma once
 #include "Camera.h"
+#include "Fbik.h"
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -27,6 +28,8 @@ class RtxView
     double animationTime() const;
     void seekAnimation(double seconds);
     void setAnimationLoop(bool loop);
+    void setCharacterMode(fbik::Mode mode);
+    fbik::Mode characterMode() const;
     size_t characterJointCount() const;
     Vec3 characterCenter() const;
     float characterRadius() const;
@@ -34,11 +37,13 @@ class RtxView
     void stopSimulation();
     void stepSimulation();
     bool simulating() const;
+    // A successful pick also prepares physics when stopped, without starting animation.
     bool beginDrag(const Camera::Ray &ray);
     void moveDrag(const Camera::Ray &ray);
     void endDrag();
     bool dragging() const;
     size_t boneColliderCount() const;
+    size_t boneJointCount() const;
     bool boneCollidersVisible() const;
     void showBoneColliders(bool visible);
     bool loaded() const;

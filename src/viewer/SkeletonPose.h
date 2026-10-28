@@ -10,6 +10,11 @@
 namespace viewer::skeleton {
 namespace st = viewer::stage;
 using namespace MeshTools;
+using MeshTools::Vec3;
+using MeshTools::Mat33;
+using MeshTools::Quat;
+using MeshTools::Identity;
+using MeshTools::Zero;
 using Matrix = AffineTransform;
 inline void require(bool condition, const std::string &message)
 {
@@ -63,10 +68,34 @@ struct Skeleton
     std::vector<std::string> names;
     std::vector<int> parents;
     std::vector<std::vector<int>> children;
-    std::vector<Matrix> jointPose, inverseBind;
+    std::vector<Matrix> jointPose, inverseBind, restLocal;
     Matrix toCharacter{Identity};
     std::vector<std::vector<Vec3>> points;
 };
+inline void applyAnimation(std::vector<Matrix> &local, const st::Prim &a, const std::vector<int> &mapping)
+{
+    const auto &ts = get(a,"translations").numbers, &qs = get(a,"rotations").numbers, &ss = get(a,"scales").numbers;
+    require((ts.empty() || ts.size()==mapping.size()*3) && (qs.empty() || qs.size()==mapping.size()*4) &&
+            (ss.empty() || ss.size()==mapping.size()*3), "Invalid animation transform counts.");
+    for (size_t i=0; i<mapping.size(); ++i)
+    {
+        if (mapping[i] < 0) continue;
+        auto &m = local[size_t(mapping[i])];
+        Vec3 scale(m.A.column0.magnitude(),m.A.column1.magnitude(),m.A.column2.magnitude());
+        require(scale.x > 0 && scale.y > 0 && scale.z > 0, "Degenerate joint scale.");
+        Mat33 rotation(m.A.column0/scale.x,m.A.column1/scale.y,m.A.column2/scale.z);
+        if (!qs.empty())
+        {
+            Quat q{float(qs[4*i]),float(qs[4*i+1]),float(qs[4*i+2]),float(qs[4*i+3])};
+            const float length = std::sqrt(q.x*q.x+q.y*q.y+q.z*q.z+q.w*q.w);
+            require(std::isfinite(length) && length > 1e-8f, "Invalid animated quaternion.");
+            rotation = Mat33(q*(1.0f/length));
+        }
+        if (!ss.empty()) scale = Vec3(float(ss[3*i]),float(ss[3*i+1]),float(ss[3*i+2]));
+        m.A = Mat33(rotation.column0*scale.x,rotation.column1*scale.y,rotation.column2*scale.z);
+        if (!ts.empty()) m.b = Vec3(float(ts[3*i]),float(ts[3*i+1]),float(ts[3*i+2]));
+    }
+}
 inline Skeleton readSkeleton(const st::Snapshot &data, const std::string &path, const std::string &character)
 {
     Skeleton sk;
@@ -102,6 +131,7 @@ inline Skeleton readSkeleton(const st::Snapshot &data, const std::string &path, 
         else local.push_back(sk.parents[i] < 0 ? matrix(bind,i*16) : inverse(matrix(bind,sk.parents[i]*16))*matrix(bind,i*16));
         if (!bind.empty()) sk.inverseBind.push_back(inverse(matrix(bind,i*16)));
     }
+    sk.restLocal = local;
     const auto &animation = inherited(data, path, "skel:animationSource").paths;
     require(animation.size() <= 1, "Multiple animation sources: " + path);
     if (!animation.empty())
@@ -109,27 +139,9 @@ inline Skeleton readSkeleton(const st::Snapshot &data, const std::string &path, 
         require(data.count(animation[0]) != 0, "Missing animation source: " + animation[0]);
         const auto &a = data.at(animation[0]);
         const auto &names = get(a, "joints").tokens;
-        const auto &ts = get(a,"translations").numbers, &qs = get(a,"rotations").numbers, &ss = get(a,"scales").numbers;
-        require((ts.empty() || ts.size()==names.size()*3) && (qs.empty() || qs.size()==names.size()*4) &&
-                (ss.empty() || ss.size()==names.size()*3), "Invalid animation transform counts.");
-        for (size_t i=0; i<names.size(); ++i)
-        {
-            if (!indices.count(names[i])) continue;
-            auto &m = local[indices.at(names[i])];
-            Vec3 scale(m.A.column0.magnitude(),m.A.column1.magnitude(),m.A.column2.magnitude());
-            require(scale.x > 0 && scale.y > 0 && scale.z > 0, "Degenerate joint scale.");
-            Mat33 rotation(m.A.column0/scale.x,m.A.column1/scale.y,m.A.column2/scale.z);
-            if (!qs.empty())
-            {
-                Quat q{float(qs[4*i]),float(qs[4*i+1]),float(qs[4*i+2]),float(qs[4*i+3])};
-                const float length = std::sqrt(q.x*q.x+q.y*q.y+q.z*q.z+q.w*q.w);
-                require(std::isfinite(length) && length > 1e-8f, "Invalid animated quaternion.");
-                rotation = Mat33(q*(1.0f/length));
-            }
-            if (!ss.empty()) scale = Vec3(float(ss[3*i]),float(ss[3*i+1]),float(ss[3*i+2]));
-            m.A = Mat33(rotation.column0*scale.x,rotation.column1*scale.y,rotation.column2*scale.z);
-            if (!ts.empty()) m.b = Vec3(float(ts[3*i]),float(ts[3*i+1]),float(ts[3*i+2]));
-        }
+        std::vector<int> mapping;
+        for (const auto &name : names) mapping.push_back(indices.count(name) ? indices.at(name) : -1);
+        applyAnimation(local, a, mapping);
     }
     for (size_t i=0; i<local.size(); ++i)
         sk.jointPose.push_back(sk.parents[i] < 0 ? local[i] : sk.jointPose[sk.parents[i]]*local[i]);

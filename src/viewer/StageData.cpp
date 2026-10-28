@@ -109,25 +109,17 @@ void hierarchy(ovstage_instance_t *stage, ovstage_ordinal_t ordinal)
 {
     wait(stage, ovstage_compute_hierarchy(stage, OVSTAGE_HIERARCHY_COMPUTATION_MODEL_DEFAULT_CPU, ordinal, ordinal));
 }
-Snapshot read(ovstage_instance_t *stage, ovstage_ordinal_t ordinal, const std::vector<std::string> &requested)
+namespace {
+Snapshot readQuery(ovstage_instance_t *stage, ovstage_ordinal_t ordinal, ovstage_query_handle_t query,
+                   const std::vector<ovx_token_t> &tokens,
+                   const std::unordered_map<ovx_token_t, std::string> &lookup,
+                   const std::unordered_map<ovx_primpath_t, std::string> *pathNames = nullptr)
 {
     Snapshot output;
-    ovstage_query_handle_t query{};
     ovstage_read_handle_t read{};
-    wait(stage, ovstage_query(stage, nullptr, nullptr, 0, &query));
+    auto *dict = ovstage_get_path_dictionary(stage);
     try
     {
-        auto *dict = ovstage_get_path_dictionary(stage);
-        std::vector<ovx_string_t> names;
-        for (const auto &name : requested)
-            names.push_back(str(name.c_str()));
-        std::vector<ovx_token_t> tokens(names.size());
-        dictionaryCheck(dict,
-                        path_dictionary_create_tokens_from_strings(dict, names.data(), names.size(), tokens.data()));
-        std::unordered_map<ovx_token_t, std::string> lookup;
-        for (size_t i = 0; i < tokens.size(); ++i)
-            lookup[tokens[i]] = requested[i];
-
         ovstage_ordinal_range_t range{};
         range.end_ordinal = ordinal;
         wait(stage, ovstage_read_attributes(stage, query, tokens.data(), tokens.size(), range, &read));
@@ -186,11 +178,12 @@ Snapshot read(ovstage_instance_t *stage, ovstage_ordinal_t ordinal, const std::v
                         else
                         {
                             const auto n = group.is_array ? t.shape[0] * t.dtype.lanes : t.dtype.lanes;
+                            value.numbers.reserve(static_cast<size_t>(n));
                             for (size_t k = 0; k < static_cast<size_t>(n); ++k)
                                 value.numbers.push_back(
                                     number(t, group.is_array ? k / t.dtype.lanes : row, k % t.dtype.lanes));
                         }
-                        output[pathText(dict, paths[index])][lookup.at(group.attribute)] = std::move(value);
+                        output[pathNames && pathNames->count(paths[index]) ? pathNames->at(paths[index]) : pathText(dict, paths[index])][lookup.at(group.attribute)] = std::move(value);
                     }
                 }
             }
@@ -210,11 +203,107 @@ Snapshot read(ovstage_instance_t *stage, ovstage_ordinal_t ordinal, const std::v
             if (op.status == OVSTAGE_OK)
                 wait(stage, op);
         }
-        wait(stage, ovstage_release_query(stage, query));
         throw;
     }
     wait(stage, ovstage_release_read(stage, read));
+    return output;
+}
+void attributeTokens(ovstage_instance_t *stage, const std::vector<std::string> &requested,
+                     std::vector<ovx_token_t> &tokens, std::unordered_map<ovx_token_t, std::string> &lookup)
+{
+    if (requested.empty()) return;
+    std::vector<ovx_string_t> names;
+    for (const auto &name : requested) names.push_back(str(name.c_str()));
+    tokens.resize(names.size());
+    auto *dict = ovstage_get_path_dictionary(stage);
+    dictionaryCheck(dict, path_dictionary_create_tokens_from_strings(dict, names.data(), names.size(), tokens.data()));
+    for (size_t i = 0; i < tokens.size(); ++i) lookup[tokens[i]] = requested[i];
+}
+}
+Snapshot read(ovstage_instance_t *stage, ovstage_ordinal_t ordinal, const std::vector<std::string> &requested)
+{
+    ovstage_query_handle_t query{};
+    wait(stage, ovstage_query(stage, nullptr, nullptr, 0, &query));
+    Snapshot output;
+    try {
+        std::vector<ovx_token_t> tokens;
+        std::unordered_map<ovx_token_t, std::string> lookup;
+        attributeTokens(stage, requested, tokens, lookup);
+        output = readQuery(stage, ordinal, query, tokens, lookup);
+    } catch (...) { ovstage_release_query(stage, query); throw; }
     wait(stage, ovstage_release_query(stage, query));
     return output;
+}
+struct Query::Impl
+{
+    ovstage_instance_t *stage = nullptr;
+    ovstage_query_handle_t query = OVSTAGE_INVALID_QUERY_HANDLE;
+    ovx_primpath_list_t list = OVX_INVALID_PRIMPATH_LIST;
+    size_t count = 0;
+    std::vector<ovx_token_t> tokens;
+    std::unordered_map<ovx_token_t, std::string> attributes;
+    std::unordered_map<ovx_primpath_t, std::string> paths;
+    ~Impl()
+    {
+        if (query != OVSTAGE_INVALID_QUERY_HANDLE) {
+            // All operations submitted by Query are completed before returning.
+            const auto op = ovstage_release_query(stage, query);
+            if (op.status == OVSTAGE_OK) {
+                ovstage_op_wait_result_t result{};
+                ovstage_wait_op(stage, op.op_index, OVSTAGE_TIMEOUT_INFINITE, &result);
+                ovstage_release_op(stage, op.op_index);
+            }
+        }
+        if (list != OVX_INVALID_PRIMPATH_LIST)
+            path_dictionary_release_path_list_reference(ovstage_get_path_dictionary(stage), list);
+    }
+};
+Query::Query() = default;
+Query::~Query() = default;
+void Query::clear() { impl.reset(); }
+void Query::init(ovstage_instance_t *stage, const std::vector<std::string> &paths,
+                 const std::vector<std::string> &attributes)
+{
+    auto next = std::make_unique<Impl>();
+    next->stage = stage;
+    next->count = paths.size();
+    if (paths.empty()) { impl = std::move(next); return; }
+    auto *dict = ovstage_get_path_dictionary(stage);
+    std::vector<ovx_string_t> names;
+    for (const auto &path : paths) names.push_back(str(path.c_str()));
+    std::vector<ovx_primpath_t> ids(paths.size());
+    dictionaryCheck(dict, path_dictionary_create_paths_from_strings(dict, names.data(), names.size(), ids.data()));
+    for (size_t i = 0; i < paths.size(); ++i)
+        if (!next->paths.emplace(ids[i], paths[i]).second) throw std::runtime_error("Duplicate query path.");
+    dictionaryCheck(dict, path_dictionary_create_path_list_from_paths(dict, ids.data(), ids.size(), &next->list));
+    check(ovstage_query_from_path_list(stage, next->list, &next->query));
+    attributeTokens(stage, attributes, next->tokens, next->attributes);
+    impl = std::move(next);
+}
+Snapshot Query::read(ovstage_ordinal_t ordinal) const
+{
+    if (!impl) throw std::runtime_error("Uninitialized stage query.");
+    if (!impl->count) return {};
+    return readQuery(impl->stage, ordinal, impl->query, impl->tokens, impl->attributes, &impl->paths);
+}
+void Query::writeTransforms(ovstage_ordinal_t ordinal, const std::vector<std::array<double, 16>> &local,
+                            const std::vector<std::array<double, 16>> *world) const
+{
+    if (!impl || local.size() != impl->count || (world && world->size() != impl->count))
+        throw std::runtime_error("Transform batch does not match query rows.");
+    if (local.empty()) return;
+    int64_t count = static_cast<int64_t>(local.size());
+    DLTensor tensors[2]{};
+    ovstage_attribute_write_t writes[2]{};
+    for (size_t i = 0; i < (world ? 2u : 1u); ++i) {
+        auto &t = tensors[i];
+        t.data = const_cast<std::array<double, 16> *>((i ? *world : local).data());
+        t.device = {kDLCPU, 0}; t.ndim = 1; t.shape = &count; t.dtype = {kDLFloat, 64, 16};
+        writes[i].attribute.string = str(i ? "omni:fabric:worldMatrix" : "omni:xform");
+        writes[i].data.tensors = &t; writes[i].data.tensor_count = 1;
+        writes[i].data.semantic = OVSTAGE_SEMANTIC_MATRIX;
+    }
+    wait(impl->stage, ovstage_write_attributes(impl->stage, impl->query, writes, world ? 2 : 1,
+                                              ordinal, OVSTAGE_PRIM_MODE_UPSERT));
 }
 } // namespace viewer::stage

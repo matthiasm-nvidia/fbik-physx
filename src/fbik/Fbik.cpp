@@ -134,6 +134,23 @@ struct Module::Impl
     std::vector<Character> characters;
     struct Body { std::string path, skeleton; size_t joint; Matrix inBone; };
     std::vector<Body> bodies;
+    st::Query poseQuery;
+    std::vector<std::string> joints;
+    std::map<std::string,std::vector<int>> parents;
+    Mode mode=Mode::Follow;
+    std::map<std::string,const Pose*> poseLookup(const std::vector<Pose> &poses) const
+    {
+        std::map<std::string,const Pose*> lookup;
+        for (const auto &p:poses) {
+            require(!lookup.count(p.skeletonPath),"Duplicate skeleton pose.");
+            lookup[p.skeletonPath]=&p;
+        }
+        require(lookup.size()==characters.size(),"Expected one pose for each skeleton.");
+        for (const auto &c:characters)
+            require(lookup.count(c.skeletonPath) && lookup.at(c.skeletonPath)->bones.size()==c.joints.size(),
+                    "Pose joint count/order must match init.");
+        return lookup;
+    }
 };
 Module::Module() : impl(std::make_unique<Impl>()) {}
 Module::~Module() = default;
@@ -143,6 +160,7 @@ InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, f
     require(scene != nullptr, "init needs a populated stage.");
     require(!impl->stage || impl->stage==scene, "Use one module per stage.");
     impl->stage=scene;
+    impl->poseQuery.clear();
     if (impl->hasLayer)
     {
         populationWait(scene,ovstage_population_remove_usd_reference(scene,impl->layer));
@@ -153,6 +171,9 @@ InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, f
     impl->roots.clear();
     impl->characters.clear();
     impl->bodies.clear();
+    impl->joints.clear();
+    impl->parents.clear();
+    impl->mode=Mode::Follow;
     const auto data=st::read(scene,ordinal,attributes);
     InitResult result;
     std::map<std::string,std::vector<Skeleton>> characters;
@@ -180,6 +201,7 @@ InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, f
         {
             ++result.skeletons;
             impl->characters.push_back({sk.path, sk.character, sk.names});
+            impl->parents.emplace(sk.path,sk.parents);
             for (const auto &[path,prim] : data)
             {
                 if (get(prim,"usd-prim-type").token!="Mesh" || path.rfind(root+"/",0)!=0) continue;
@@ -206,6 +228,9 @@ InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, f
         for (size_t si=0; si<skeletons.size(); ++si)
         {
             auto &sk=skeletons[si];
+            const std::string skeletonRoot=root+"/"+name+"/Skeleton_"+std::to_string(si);
+            std::map<size_t,size_t> bodyIndices;
+            std::map<size_t,Matrix> bodyPoses;
             usd << "def Scope \"Skeleton_" << si << "\"\n{\n";
             for (size_t j=0; j<sk.names.size(); ++j)
             {
@@ -245,7 +270,9 @@ InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, f
                     << "bool physics:collisionEnabled = true\ncolor3f[] primvars:displayColor = " << (mesh ? "[(0.15,0.65,0.95)]" : "[(0.95,0.65,0.1)]") << "\n";
                 Mat33 axes(rotation);
 
-                impl->bodies.push_back({root+"/"+name+"/Skeleton_"+std::to_string(si)+"/Joint_"+std::to_string(j),
+                bodyIndices[j]=impl->bodies.size();
+                bodyPoses.emplace(j,Matrix(axes,center));
+                impl->bodies.push_back({skeletonRoot+"/Joint_"+std::to_string(j),
                     sk.path,j,inverse(sk.toCharacter*sk.jointPose[j])*Matrix(axes,center)});
                 pose(usd,center,rotation);
                 if (mesh)
@@ -263,11 +290,43 @@ InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, f
                          << "\nuniform token axis = \"Z\"\nuniform token[] xformOpOrder = [\"xformOp:translate\",\"xformOp:orient\"]\n";
                 usd << "}\n";
             }
+            for (const auto &[j,index] : bodyIndices)
+            {
+                int p=sk.parents[j];
+                while (p>=0 && !bodyIndices.count(size_t(p))) p=sk.parents[p];
+                if (p<0) continue; // A root body is free, never attached to the world.
+                const auto anchor=sk.toCharacter.transform(sk.jointPose[j].b);
+                const auto jointName="Attachment_"+std::to_string(j);
+                impl->joints.push_back(skeletonRoot+"/"+jointName);
+                ++result.joints;
+                usd << "def PhysicsSphericalJoint " << quote(jointName) << "\n{\n"
+                    << "rel physics:body0 = <" << impl->bodies[bodyIndices.at(size_t(p))].path << ">\n"
+                    << "rel physics:body1 = <" << impl->bodies[index].path << ">\n"
+                    << "point3f physics:localPos0 = ";
+                vector(usd,inverse(bodyPoses.at(size_t(p))).transform(anchor));
+                usd << "\npoint3f physics:localPos1 = ";
+                vector(usd,inverse(bodyPoses.at(j)).transform(anchor));
+                usd << "\nquatf physics:localRot0 = (1,0,0,0)\nquatf physics:localRot1 = (1,0,0,0)\n"
+                    << "bool physics:jointEnabled = false\nbool physics:collisionEnabled = false\n"
+                    << "bool physics:excludeFromArticulation = true\n"
+                    << "float physics:coneAngle0Limit = -1\nfloat physics:coneAngle1Limit = -1\n}\n";
+            }
             usd << "}\n";
         }
         usd << "}\n";
     }
     closePath(usd, openRoot);
+    if (!impl->bodies.empty())
+    {
+        std::string group="__FbikBoneCollisionGroup";
+        while (data.count("/"+group)) group+="_";
+        usd << "def PhysicsCollisionGroup " << quote(group) << "\n{\n"
+            << "rel physics:filteredGroups = </" << group << ">\n"
+            << "rel collection:colliders:includes = [";
+        for (size_t i=0;i<impl->bodies.size();++i)
+            usd << (i ? "," : "") << '<' << impl->bodies[i].path << '>';
+        usd << "]\n}\n";
+    }
     if (!characters.empty())
     {
         const auto content=usd.str();
@@ -276,20 +335,15 @@ InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, f
         populationWait(scene,ovstage_population_apply_usd_changes(scene,++ordinal));
         st::seal(scene,ordinal); st::hierarchy(scene,ordinal);
     }
+    std::vector<std::string> bodyPaths;
+    for (const auto &body : impl->bodies) bodyPaths.push_back(body.path);
+    impl->poseQuery.init(scene, bodyPaths, {"omni:fabric:worldMatrix"});
     return result;
 }
 const std::vector<Character> &Module::characters() const { return impl->characters; }
 std::vector<BodyTarget> Module::updateTargets(const std::vector<Pose> &poses) const
 {
-    std::map<std::string,const Pose*> lookup;
-    for (const auto &p : poses) {
-        require(!lookup.count(p.skeletonPath), "Duplicate skeleton pose.");
-        lookup[p.skeletonPath]=&p;
-    }
-    require(lookup.size()==impl->characters.size(), "Expected one pose for each skeleton.");
-    for (const auto &c : impl->characters)
-        require(lookup.count(c.skeletonPath) && lookup.at(c.skeletonPath)->bones.size()==c.joints.size(),
-                "Pose joint count/order must match init.");
+    const auto lookup=impl->poseLookup(poses);
     std::vector<BodyTarget> targets;
     for (const auto &b : impl->bodies) {
         const auto &p=*lookup.at(b.skeleton);
@@ -297,6 +351,85 @@ std::vector<BodyTarget> Module::updateTargets(const std::vector<Pose> &poses) co
         targets.push_back({b.path,packed(local),packed(unpacked(p.characterWorld)*local)});
     }
     return targets;
+}
+Mode Module::mode() const { return impl->mode; }
+void Module::setMode(Mode mode, ovstage_ordinal_t &ordinal)
+{
+    require(impl->stage!=nullptr,"setMode requires init.");
+    require(mode==Mode::Follow || mode==Mode::Ragdoll,"Invalid character mode.");
+    if (mode==impl->mode) return;
+    auto *s=impl->stage;
+    std::vector<ovstage_query_handle_t> queries;
+    // Resolve queries before opening the control ordinal.
+    const auto query=[&](const std::string &path) {
+        auto value=st::str(path.c_str());
+        ovstage_predicate_t predicate{};predicate.attribute.string=st::str("usd-path");
+        predicate.op=OVSTAGE_FILTER_OP_IN;predicate.values=&value;predicate.value_count=1;
+        ovstage_filter_t filter{&predicate,1};ovstage_query_handle_t handle{};
+        st::wait(s,ovstage_query(s,&filter,nullptr,0,&handle));queries.push_back(handle);
+    };
+    bool writing=false;
+    try
+    {
+        for (const auto &body:impl->bodies) query(body.path);
+        for (const auto &joint:impl->joints) query(joint);
+        ++ordinal;writing=true;
+        const auto write=[&](size_t i,const char *name,void *value,DLDataType dtype) {
+            int64_t shape=1;DLTensor tensor{};tensor.data=value;tensor.device={kDLCPU,0};
+            tensor.ndim=1;tensor.shape=&shape;tensor.dtype=dtype;
+            ovstage_write_data_t data{};data.tensors=&tensor;data.tensor_count=1;
+            ovx_string_or_token_t attribute{};attribute.string=st::str(name);
+            st::wait(s,ovstage_write_attribute(s,queries[i],attribute,ordinal,data,OVSTAGE_PRIM_MODE_UPSERT));
+        };
+        uint8_t kinematic=mode==Mode::Follow,enabled=mode==Mode::Ragdoll,asleep=0;
+        float zero[3]={0,0,0};
+        for (size_t i=0;i<impl->bodies.size();++i) {
+            write(i,"physics:kinematicEnabled",&kinematic,{kDLBool,8,1});
+            write(i,"physics:velocity",zero,{kDLFloat,32,3});
+            write(i,"physics:angularVelocity",zero,{kDLFloat,32,3});
+            write(i,"physics:startsAsleep",&asleep,{kDLBool,8,1});
+        }
+        for (size_t i=0;i<impl->joints.size();++i)
+            write(impl->bodies.size()+i,"physics:jointEnabled",&enabled,{kDLBool,8,1});
+        st::seal(s,ordinal);writing=false;
+    }
+    catch (...) {
+        if (writing) { try { st::seal(s,ordinal); } catch (...) {} }
+        for (auto q:queries) ovstage_release_query(s,q);
+        throw;
+    }
+    for (auto q:queries) st::wait(s,ovstage_release_query(s,q));
+    impl->mode=mode;
+}
+std::vector<Pose> Module::readPoses(const std::vector<Pose> &referencePoses,ovstage_ordinal_t ordinal) const
+{
+    require(impl->stage!=nullptr,"readPoses requires init.");
+    impl->poseLookup(referencePoses);
+    const auto data=impl->poseQuery.read(ordinal);
+    auto poses=referencePoses;
+    for (auto &pose:poses)
+    {
+        const auto reference=pose.bones;
+        const auto toCharacter=inverse(unpacked(pose.characterWorld));
+        std::map<size_t,const Impl::Body*> bodies;
+        for (const auto &body:impl->bodies)
+            if (body.skeleton==pose.skeletonPath) bodies.emplace(body.joint,&body);
+        const auto &parents=impl->parents.at(pose.skeletonPath);
+        for (size_t j=0;j<pose.bones.size();++j)
+        {
+            if (const auto it=bodies.find(j);it!=bodies.end()) {
+                const auto &body=*it->second;
+                require(data.count(body.path) && get(data.at(body.path),"omni:fabric:worldMatrix").numbers.size()==16,
+                        "Missing simulated body pose: "+body.path);
+                pose.bones[j]=packed(toCharacter*world(data.at(body.path))*inverse(body.inBone));
+            }
+            else if (parents[j]>=0) {
+                const size_t p=size_t(parents[j]);
+                pose.bones[j]=packed(unpacked(pose.bones[p])*inverse(unpacked(reference[p]))*unpacked(reference[j]));
+            }
+        }
+    }
+    return poses;
 }
 void Module::showColliders(bool visible, ovstage_ordinal_t &ordinal)
 {

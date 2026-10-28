@@ -31,7 +31,7 @@ struct Viewer
     int mouseX = 0, mouseY = 0;
     std::string pendingLoad, inputError;
     viewer::RtxView *rtx = nullptr;
-    bool playing = false, animationPlaying = true, loop = true, follow = false;
+    bool playing = false, animationPlaying = false, loop = true, follow = false;
     float playbackSpeed = 1;
 };
 Viewer &state(GLFWwindow *window)
@@ -49,7 +49,7 @@ void frameScene(Viewer &v)
     auto direction = v.zUp ? viewer::Vec3(1, -1, 0.65f) : viewer::Vec3(1, 0.65f, 1);
     direction.normalize();
     const float distance = v.sceneRadius / std::sin(v.camera.fov * 3.14159265f / 360) * 1.15f;
-    v.camera.look_at(v.orbitCenter + direction * distance, v.orbitCenter);
+    v.camera.look_at(v.orbitCenter + direction * (distance * 0.5f), v.orbitCenter);
     v.camera.right = v.camera.forward.cross(v.camera.orbitUp);
     v.camera.right.normalize();
     v.camera.up = v.camera.right.cross(v.camera.forward);
@@ -179,7 +179,8 @@ void cursorCallback(GLFWwindow *w, double x, double y)
     else if (glfwGetMouseButton(w, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS)
         v.camera.handle_mouse_orbit(dx, dy, v.orbitCenter);
 }
-void drawImage(GLuint texture, int width, int height, const std::vector<uint8_t> &pixels)
+void drawImage(GLuint texture, int &textureWidth, int &textureHeight,
+               int width, int height, const std::vector<uint8_t> &pixels)
 {
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_TEXTURE_2D);
@@ -187,7 +188,11 @@ void drawImage(GLuint texture, int width, int height, const std::vector<uint8_t>
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+    if (width != textureWidth || height != textureHeight) {
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+        textureWidth = width; textureHeight = height;
+    }
+    else glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
     glMatrixMode(GL_MODELVIEW);
@@ -251,8 +256,10 @@ int wmain(int argc, wchar_t **argv)
     if (!length || length == 32768)
         return 1;
     const auto executableDirectory = std::filesystem::path(executablePath).parent_path();
-    const std::string demoPaths[] = {(executableDirectory / "resources/scenes/falling_box.usda").u8string()};
-    const char *demoNames[] = {"Falling box"};
+    const std::string demoPaths[] = {
+        (executableDirectory / "resources/scenes/basic_walk.usda").u8string(),
+        (executableDirectory / "resources/scenes/falling_box.usda").u8string()};
+    const char *demoNames[] = {"Basic walk", "Falling box"};
     static_assert(std::size(demoPaths) == std::size(demoNames));
     viewer::RecentFiles recent(executableDirectory / "../../.cache/recent-usd.txt");
 
@@ -293,6 +300,7 @@ int wmain(int argc, wchar_t **argv)
         if (count > 0) state(w).pendingLoad = paths[0];
     });
     GLuint texture = 0;
+    int textureWidth = 0, textureHeight = 0;
     glGenTextures(1, &texture);
     int exitCode = 0;
     try
@@ -381,7 +389,7 @@ int wmain(int argc, wchar_t **argv)
                 try
                 {
                     rtx.render(v.camera, width, height);
-                    drawImage(texture, rtx.width(), rtx.height(), rtx.pixels());
+                    drawImage(texture, textureWidth, textureHeight, rtx.width(), rtx.height(), rtx.pixels());
                 }
                 catch (const std::exception &e)
                 {
@@ -454,7 +462,7 @@ int wmain(int argc, wchar_t **argv)
                 {
                     try
                     {
-                        if (ImGui::Button(v.playing ? "Pause simulation" : "Play simulation"))
+                        if (ImGui::Button(v.playing ? "Pause simulation" : "Start simulation"))
                         {
                             if (!v.playing && !renderFailed) preparePlayback(v);
                             else rtx.endDrag();
@@ -466,7 +474,7 @@ int wmain(int argc, wchar_t **argv)
                         if (ImGui::Button("Reset"))
                         {
                             rtx.stopSimulation();
-                            v.animationPlaying = true;
+                            v.animationPlaying = false;
                             if (v.playing && !renderFailed) preparePlayback(v);
                             accumulator = 0;
                             previousTime = glfwGetTime();
@@ -483,14 +491,30 @@ int wmain(int argc, wchar_t **argv)
                         }
                         if (hasCharacter)
                         {
+                            int mode=rtx.characterMode()==fbik::Mode::Ragdoll ? 1 : 0;
+                            ImGui::PushItemWidth(210 * 0.7f * scale);
+                            if (ImGui::Combo("Mode", &mode, "Follow\0Ragdoll\0")) {
+                                rtx.setCharacterMode(mode ? fbik::Mode::Ragdoll : fbik::Mode::Follow);
+                                v.animationPlaying=rtx.animating();
+                            }
+                            ImGui::PopItemWidth();
+                        }
+                        if (hasCharacter && rtx.characterMode()==fbik::Mode::Follow)
+                        {
                             if (ImGui::Button(v.animationPlaying ? "Pause animation" : "Play animation"))
                             {
                                 v.animationPlaying = !v.animationPlaying;
-                                if (v.animationPlaying) rtx.startAnimation();
+                                if (v.animationPlaying)
+                                {
+                                    preparePlayback(v);
+                                    v.playing = true;
+                                    previousTime = glfwGetTime();
+                                    accumulator = 0;
+                                }
                                 else rtx.stopAnimation();
                             }
                             if (ImGui::IsItemHovered())
-                                ImGui::SetTooltip("Hold the current animation pose while simulation continues.");
+                                ImGui::SetTooltip("Start walking, or hold the current pose while simulation continues.");
                             sameLineIfFits("Loop", true);
                             if (ImGui::Checkbox("Loop", &v.loop)) rtx.setAnimationLoop(v.loop);
                             float time = float(rtx.animationTime());
@@ -517,9 +541,9 @@ int wmain(int argc, wchar_t **argv)
                         if (ImGui::Button("Frame character") && hasCharacter) frameCharacter(v);
                         if (!hasCharacter && ImGui::IsItemHovered())
                             ImGui::SetTooltip("The current scene has no character.");
-                        sameLineIfFits("Follow", true);
+                        sameLineIfFits("Follow camera", true);
                         bool follow = hasCharacter && v.follow;
-                        if (ImGui::Checkbox("Follow", &follow) && hasCharacter) v.follow = follow;
+                        if (ImGui::Checkbox("Follow camera", &follow) && hasCharacter) v.follow = follow;
                         if (!hasCharacter && ImGui::IsItemHovered())
                             ImGui::SetTooltip("The current scene has no character.");
                         if (ImGui::Button(recorder.active() ? "Stop recording" : "Record movie"))
@@ -552,7 +576,10 @@ int wmain(int argc, wchar_t **argv)
                     {
                         ImGui::Text("Character: %zu joints", rtx.characterJointCount());
                         ImGui::Text("Mapped: %zu bodies", rtx.boneColliderCount());
-                        ImGui::TextWrapped("Kinematic bone bodies follow the animation.");
+                        ImGui::Text("Connected: %zu joints", rtx.boneJointCount());
+                        ImGui::TextWrapped(rtx.characterMode()==fbik::Mode::Follow
+                            ? "Kinematic bone bodies follow the animation."
+                            : "Dynamic bone bodies drive the character. Animation is held.");
                     }
                 }
             }
@@ -634,7 +661,7 @@ int wmain(int argc, wchar_t **argv)
                     rtx.load(requested, width, height);
                     renderFailed = false;
                     v.playing = false;
-                    v.animationPlaying = true;
+                    v.animationPlaying = false;
                     rtx.setAnimationLoop(v.loop);
                     followCenter = rtx.characterCenter();
                     v.sceneCenter = v.orbitCenter = rtx.center();

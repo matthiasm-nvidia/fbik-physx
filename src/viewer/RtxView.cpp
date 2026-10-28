@@ -94,6 +94,9 @@ void rtxWait(ovrtx_renderer_t *renderer, ovrtx_enqueue_result_t op)
 
 struct Scene
 {
+    struct StageDeleter { void operator()(ovstage_instance_t *s) const { ovstage_destroy_instance(s); } };
+    // Declared first so every cached query and physics instance dies before its stage.
+    std::unique_ptr<ovstage_instance_t, StageDeleter> stageOwner;
     ovstage_instance_t *stage = nullptr;
     ovstage_query_handle_t camera = OVSTAGE_INVALID_QUERY_HANDLE;
     ovstage_query_handle_t product = OVSTAGE_INVALID_QUERY_HANDLE;
@@ -107,20 +110,17 @@ struct Scene
     std::unique_ptr<PhysicsSimulation> physics;
     fbik::Module characterPhysics;
     Skinning skinning;
+    AnimationPlayer animation;
+    stage::Query previewTargets;
+    bool previewTargetsReady = false;
+    bool skinDirty = false, ragdollDirty = false;
+    std::vector<fbik::Pose> skinPoses;
     fbik::InitResult characterStats;
+    std::vector<fbik::Pose> referencePoses;
     bool showBones = false, animationPlaying = false, animationLoop = false;
     double animationTime = 0, animationStart = 0, animationEnd = 0;
     Vec3 characterCenter{0, 0, 0};
     float characterRadius = 1;
-    ~Scene()
-    {
-        physics.reset();
-        if (stage)
-        {
-            // Destruction completes pending operations and releases stage-owned queries.
-            ovstage_destroy_instance(stage);
-        }
-    }
     void seal()
     {
         ovstage_write_floor_desc_t floor{};
@@ -168,36 +168,33 @@ struct Scene
     }
     void sample(double seconds)
     {
-        const auto poses = sampleAnimation(stage, ordinal, seconds, characterPhysics.characters());
-        skinning.update(poses, ordinal);
+        const auto poses = animation.sample(ordinal, seconds);
+        referencePoses=poses;
         const auto targets = characterPhysics.updateTargets(poses);
         if (physics)
             physics->setKinematicTargets(targets, ordinal);
         else if (!targets.empty())
         {
-            // Resolve every query before opening a write ordinal. Fetching a new
-            // query between writes can wait for that ordinal to be sealed.
-            std::vector<ovstage_query_handle_t> queries;
-            for (const auto &target : targets)
-                queries.push_back(query(target.path.c_str()));
-            try
-            {
-                ++ordinal;
-                for (size_t i = 0; i < targets.size(); ++i)
-                {
-                    auto local = targets[i].local;
-                    write(queries[i], "omni:xform", local.data(), kDLFloat, 64, 16, OVSTAGE_SEMANTIC_MATRIX);
-                }
-                seal();
+            std::vector<fbik::Matrix4> local;
+            if (!previewTargetsReady) {
+                std::vector<std::string> paths;
+                for (const auto &target : targets) paths.push_back(target.path);
+                previewTargets.init(stage, paths);
+                previewTargetsReady = true;
             }
-            catch (...)
-            {
-                for (auto handle : queries) ovstage_release_query(stage, handle);
-                throw;
-            }
-            for (auto handle : queries) stageWait(stage, ovstage_release_query(stage, handle));
+            for (const auto &target : targets) local.push_back(target.local);
+            previewTargets.writeTransforms(++ordinal, local);
+            seal();
             viewer::stage::hierarchy(stage, ordinal);
         }
+        displayPose(poses);
+        animationTime = seconds;
+    }
+    void displayPose(const std::vector<fbik::Pose> &poses)
+    {
+        skinPoses = poses;
+        skinDirty = true;
+        ragdollDirty = false;
         if (!poses.empty() && !poses.front().bones.empty())
         {
             const auto &pose = poses.front();
@@ -212,8 +209,21 @@ struct Scene
             for (const auto &bone : pose.bones)
                 characterRadius = std::max(characterRadius, (jointPosition(bone) - characterCenter).magnitude() * 1.15f);
         }
-        animationTime = seconds;
     }
+    void updatePose()
+    {
+        if (physics) physics->publish(ordinal);
+        if (ragdollDirty) displayPose(characterPhysics.readPoses(referencePoses, ordinal));
+    }
+    void updateSkin()
+    {
+        updatePose();
+        if (skinDirty) {
+            skinning.update(skinPoses, ordinal);
+            skinDirty = false;
+        }
+    }
+
 };
 
 // Scalar access honors the tensor byte offset and element stride.
@@ -492,6 +502,7 @@ void RtxView::load(const std::string &path, int width, int height)
     ovstage_instance_desc_t desc{};
     desc.name = "fbik-physx-viewer";
     stageCheck(ovstage_create_instance(&desc, &candidate->stage), "Create stage");
+    candidate->stageOwner.reset(candidate->stage);
     const ovx_string_t metadata[] = {lit("upAxis"), lit("metersPerUnit"), lit("startTimeCode"),
                                    lit("endTimeCode"), lit("timeCodesPerSecond")};
     ovstage_population_desc_t population{};
@@ -539,6 +550,7 @@ void RtxView::load(const std::string &path, int width, int height)
     candidate->seal();
     candidate->characterStats = candidate->characterPhysics.init(candidate->stage, candidate->ordinal);
     candidate->skinning.init(candidate->stage,candidate->ordinal,candidate->characterPhysics.characters());
+    candidate->animation.init(candidate->stage,candidate->ordinal,candidate->characterPhysics.characters());
     const auto &stats = candidate->characterStats;
     std::printf("FBIK: %zu characters, %zu skeletons, %zu convex meshes, %zu capsules, %zu leaves skipped, %zu degenerate segments skipped\n",
                 stats.characters, stats.skeletons, stats.convexMeshes, stats.capsules, stats.leaves, stats.degenerate);
@@ -561,6 +573,7 @@ void RtxView::load(const std::string &path, int width, int height)
     populationWait(candidate->stage, ovstage_population_apply_usd_changes(candidate->stage, ++candidate->ordinal));
     candidate->seal();
     candidate->sample(candidate->animationStart);
+    candidate->updateSkin();
     candidate->camera = candidate->query((candidate->viewerRoot + "/Camera").c_str());
     candidate->product = candidate->query((candidate->viewerRoot + "/View").c_str());
     if (impl->attached)
@@ -598,6 +611,7 @@ void RtxView::render(const Camera &camera, int width, int height)
     if (!impl->scene || !impl->attached)
         return;
     Scene &scene = *impl->scene;
+    scene.updateSkin();
     const std::array<double, 16> matrix{
         camera.right.x,    camera.right.y,    camera.right.z,    0, camera.up.x,  camera.up.y,  camera.up.z,  0,
         -camera.forward.x, -camera.forward.y, -camera.forward.z, 0, camera.pos.x, camera.pos.y, camera.pos.z, 1};
@@ -720,7 +734,7 @@ void RtxView::render(const Camera &camera, int width, int height)
 
 void RtxView::startAnimation()
 {
-    if (!simulating() || !boneColliderCount() || animating()) return;
+    if (!simulating() || !boneColliderCount() || animating() || characterMode()==fbik::Mode::Ragdoll) return;
     impl->scene->animationPlaying=true;
 }
 void RtxView::stopAnimation()
@@ -736,17 +750,40 @@ void RtxView::seekAnimation(double seconds)
 {
     if (!std::isfinite(seconds)) throw std::runtime_error("Invalid animation time.");
     if (!impl->scene) return;
+    if (characterMode()==fbik::Mode::Ragdoll) return;
+    // Finish older ticks before authoring a scrubbed target that has not been simulated yet.
+    if (impl->scene->physics) impl->scene->physics->publish(impl->scene->ordinal);
     impl->scene->sample(std::clamp(seconds, animationStart(), animationEnd()));
     impl->lastLens = {};
 }
 void RtxView::setAnimationLoop(bool loop) { if (impl->scene) impl->scene->animationLoop = loop; }
+fbik::Mode RtxView::characterMode() const
+{
+    return impl->scene ? impl->scene->characterPhysics.mode() : fbik::Mode::Follow;
+}
+void RtxView::setCharacterMode(fbik::Mode mode)
+{
+    if (!impl->scene || mode==characterMode()) return;
+    auto &s=*impl->scene;
+    endDrag();
+    if (s.physics) s.physics->publish(s.ordinal);
+    s.characterPhysics.setMode(mode,s.ordinal);
+    if (s.physics) s.physics->applyControlChanges(s.ordinal);
+    if (mode==fbik::Mode::Ragdoll) {
+        s.animationPlaying=false;
+        s.displayPose(s.characterPhysics.readPoses(s.referencePoses,s.ordinal));
+    }
+    else s.sample(s.animationTime);
+    impl->lastLens={};
+}
+size_t RtxView::boneJointCount() const { return impl->scene ? impl->scene->characterStats.joints : 0; }
 size_t RtxView::characterJointCount() const
 {
     return impl->scene && !impl->scene->characterPhysics.characters().empty()
         ? impl->scene->characterPhysics.characters().front().joints.size() : 0;
 }
-Vec3 RtxView::characterCenter() const { return impl->scene ? impl->scene->characterCenter : Vec3(0, 0, 0); }
-float RtxView::characterRadius() const { return impl->scene ? impl->scene->characterRadius : 1; }
+Vec3 RtxView::characterCenter() const { if (impl->scene) impl->scene->updatePose(); return impl->scene ? impl->scene->characterCenter : Vec3(0, 0, 0); }
+float RtxView::characterRadius() const { if (impl->scene) impl->scene->updatePose(); return impl->scene ? impl->scene->characterRadius : 1; }
 
 void RtxView::startSimulation()
 {
@@ -756,20 +793,23 @@ void RtxView::startSimulation()
 void RtxView::stopSimulation()
 {
     if (!impl->scene) return;
+    const auto mode=characterMode();
     if (simulating())
     {
         impl->scene->physics->stop(impl->scene->ordinal);
         impl->scene->physics.reset();
     }
     impl->scene->animationPlaying = false;
+    impl->scene->characterPhysics.setMode(fbik::Mode::Follow,impl->scene->ordinal);
     impl->scene->sample(impl->scene->animationStart);
+    impl->scene->characterPhysics.setMode(mode,impl->scene->ordinal);
     impl->lastLens = {}; // Removing the temporary joint layer can refresh viewer attributes.
 }
 void RtxView::stepSimulation()
 {
     if (!simulating()) return;
     auto &s=*impl->scene;
-    if (s.animationPlaying) {
+    if (s.animationPlaying && characterMode()==fbik::Mode::Follow) {
         double time = s.animationTime + PhysicsSimulation::timeStep;
         if (s.animationEnd > s.animationStart && time > s.animationEnd)
         {
@@ -783,7 +823,8 @@ void RtxView::stepSimulation()
         }
         s.sample(time);
     }
-    s.physics->step(s.ordinal);
+    s.physics->step(s.ordinal, false);
+    if (characterMode()==fbik::Mode::Ragdoll) s.ragdollDirty = true;
 }
 bool RtxView::simulating() const
 {
@@ -792,14 +833,36 @@ bool RtxView::simulating() const
 
 bool RtxView::beginDrag(const Camera::Ray &ray)
 {
-    if (!simulating()) return false;
+    if (!loaded()) return false;
+    auto &s=*impl->scene;
+    const bool starting = !simulating();
+    if (starting)
+    {
+        const auto bodies = stage::read(s.stage, s.ordinal, {"physics:rigidBodyEnabled"});
+        const bool hasBodies = std::any_of(bodies.begin(), bodies.end(), [](const auto &entry) {
+            const auto enabled = entry.second.find("physics:rigidBodyEnabled");
+            return enabled != entry.second.end() && !enabled->second.numbers.empty() && enabled->second.numbers[0] != 0;
+        });
+        if (!hasBodies) return false;
+        startSimulation();
+    }
     // Reference population may refresh camera/product attributes from their USD layer.
     impl->lastLens = {};
-    auto &s=*impl->scene;
-    const bool picked=s.physics->beginDrag(ray.origin,ray.direction,s.ordinal);
+    bool picked = false;
+    try { picked = s.physics->beginDrag(ray.origin,ray.direction,s.ordinal); }
+    catch (...)
+    {
+        if (starting) s.physics.reset();
+        throw;
+    }
+    if (!picked && starting) s.physics.reset();
     // Adding the mouse-joint layer can repopulate authored (unskinned) mesh points.
-    if (picked && !s.characterPhysics.characters().empty())
-        s.skinning.update(sampleAnimation(s.stage,s.ordinal,s.animationTime,s.characterPhysics.characters()),s.ordinal);
+    if (picked && !s.characterPhysics.characters().empty()) {
+        if (characterMode()==fbik::Mode::Ragdoll)
+            s.displayPose(s.characterPhysics.readPoses(s.referencePoses,s.ordinal));
+        else
+            s.displayPose(s.referencePoses);
+    }
     return picked;
 }
 void RtxView::moveDrag(const Camera::Ray &ray)

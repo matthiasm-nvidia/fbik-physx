@@ -24,7 +24,11 @@ class PhysicsSimulation
     PhysicsSimulation(const PhysicsSimulation &) = delete;
     PhysicsSimulation &operator=(const PhysicsSimulation &) = delete;
     void setKinematicTargets(const std::vector<fbik::BodyTarget> &targets, ovstage_ordinal_t &ordinal);
-    void step(ovstage_ordinal_t &ordinal);
+    // Consume only a dedicated, sealed input ordinal (e.g. Module::setMode).
+    void applyControlChanges(ovstage_ordinal_t ordinal);
+    // A viewer may defer output across catch-up ticks, then publish once before rendering/control changes.
+    void step(ovstage_ordinal_t &ordinal, bool publishOutput = true);
+    void publish(ovstage_ordinal_t &ordinal);
     void stop(ovstage_ordinal_t &ordinal);
     bool beginDrag(Vec3 origin, Vec3 direction, ovstage_ordinal_t &ordinal);
     void moveDrag(Vec3 origin, Vec3 direction, ovstage_ordinal_t &ordinal);

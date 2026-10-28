@@ -1,0 +1,51 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+def Xform "World"
+{
+    def PhysicsScene "Physics" (prepend apiSchemas = ["PhysxSceneAPI"])
+    {
+        vector3f physics:gravityDirection = (0, -1, 0)
+        float physics:gravityMagnitude = 9.81
+        bool physxScene:enableGPUDynamics = false
+        token physxScene:broadphaseType = "MBP"
+    }
+    def Cube "Floor" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+    {
+        double size = 1
+        double3 xformOp:translate = (0, -0.5, 0)
+        float3 xformOp:scale = (30, 1, 30)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+    def SkelRoot "A"
+    {
+        double3 xformOp:translate = (3, 0, 0)
+        quatf xformOp:orient = (0.70710678, 0, 0.70710678, 0)
+        float3 xformOp:scale = (1.5, 1.5, 1.5)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+        def Skeleton "Rig"
+        {
+            # The children of gap average to its own position, so it has no body.
+            uniform token[] joints = ["root", "root/gap", "root/gap/arm", "root/gap/arm/tip", "root/gap/opposite"]
+            uniform matrix4d[] bindTransforms = [
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,3,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,4,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(1,4,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(2,4,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(-1,4,0,1))
+            ]
+            uniform matrix4d[] restTransforms = [
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,3,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,1,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(1,0,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(1,0,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(-1,0,0,1))
+            ]
+        }
+    }
+    # Deliberately coincident: all bone-to-bone collisions must be filtered.
+    def SkelRoot "B" (prepend references = </World/A>) {}
+}

@@ -4,7 +4,7 @@ namespace viewer {
 std::vector<fbik::Pose> sampleAnimation(ovstage_instance_t *s, ovstage_ordinal_t &ordinal,
                                       double seconds, const std::vector<fbik::Character> &characters)
 {
-    if (!std::isfinite(seconds) || seconds<0) throw std::runtime_error("Invalid animation time.");
+    if (!std::isfinite(seconds)) throw std::runtime_error("Invalid animation time.");
     auto op=ovstage_population_apply_usd_time(s,++ordinal,seconds);
     stage::check(op.status);
     ovstage_population_op_wait_result_t result{};

@@ -23,9 +23,10 @@ All sources, fonts, third-party libraries, and SDK paths are local to this proje
 building and running do not require the original FBIK checkout.
 
 The viewer starts empty. Click **Load USD...** to open a `.usd`, `.usda`, `.usdc`,
-or `.usdz` file, or select a previously opened file from **Recent USD**. The last
+or `.usdz` file, or select a previously opened file from **Recent**. The last
 ten successfully loaded paths are stored in `.cache/recent-usd.txt` across runs.
-Hover over a recent filename to see its full path. A failed load reports an error
+The current file's full path appears in the window title. Hover over a recent
+filename to see its full path. A failed load reports an error
 and retains the previous stage when the SDK permits recovery.
 
 You can also start with a file:
@@ -39,7 +40,7 @@ the scene bounds. **Frame stage** or Home restores automatic framing. Left drag
 orbits, right drag looks around, middle drag pans, the wheel moves forward/back,
 and W/A/S/D and Q/E move the camera. Escape closes the viewer.
 
-USD animation is sampled at time zero on load and advanced by Start animation.
+USD animation is sampled at the authored start time on load and advanced during playback.
 The viewer evaluates the skeleton and updates skinned mesh points, smooth normals,
 and bounds for the native renderer. FBIK fits collision shapes at initialization. Referenced
 assets must be available to the SDK. Source files are never saved or modified;
@@ -49,11 +50,15 @@ Initial RTX shader preparation may take several minutes. Runtime logs are under
 
 ## Falling box simulation
 
-Click **Load falling box**, then **Start simulation**. The button changes to
-**Stop simulation** while the orange box falls onto the static ground. Stop
-restores the original pose and discards the physics instance, including velocities
-and contact state. Start again to repeat the drop. Loading another USD ends the
-previous simulation and opens the new stage stopped.
+Select **Falling box** from the scene dropdown, then open **Scene** and click
+**Play simulation**. **Pause simulation** freezes the current state without resetting
+velocities or contacts. **Reset** restores the starting scene and animation time;
+if playback was running, it restarts from there. **Step** pauses playback and advances
+one 1/60-second physics tick. Space toggles play/pause. Loading another USD opens it stopped.
+
+The compact panel follows the original FBIK viewer: load/reload, **Scene**, **Info**,
+and **Camera controls**. The advanced **Simulation** section and unavailable
+FBIK/IK/ragdoll controls are omitted. **Recent** retains this viewer's file history.
 
 The editable sample is `resources/scenes/falling_box.usda` (copied beside the
 executable by the build). It uses meters, Y-up, gravity of 9.81 m/s², a 1 kg box
@@ -62,12 +67,12 @@ The sample explicitly selects CPU physics; RTX still renders on the GPU.
 Other loaded USD files need enabled rigid bodies and collision/scene settings.
 Point-instanced physics output is not supported in this milestone.
 
-While simulation runs, **left-drag a movable body** to pick it up. A temporary
+While simulation runs, **Shift + left-drag a movable body** to pick it up. A temporary
 D6 joint pulls the clicked point toward the cursor at the original picking
 distance, using damped translation drives while allowing free rotation. The body
 continues colliding with the scene. Release the mouse to let go; releasing over
 the UI or switching away from the window also ends the drag. Clicking empty space
-or static geometry retains camera orbit. Stop and scene replacement clear the
+or static geometry retains camera orbit. Reset and scene replacement clear the
 joint. No picking helpers are saved into the source USD.
 
 Physics advances at a fixed 1/60 second timestep. Catch-up is capped to 0.1 seconds
@@ -78,13 +83,19 @@ Source USD files are unchanged.
 
 ## Walking collision test
 
-Load the falling-box scene, click **Start simulation**, then **Start animation**.
-SOMA walks toward the cube and pushes it along the floor. The walk runs once and
-holds its final pose. **Stop animation** pauses playback at its current pose while
-physics keeps running; **Start animation** resumes from that time. Animation
-controls are available while simulating and never start or reset physics.
-**Stop simulation** ends playback and restores the character, skin, cube, and
-animation time. Loading another scene starts stopped.
+Load the falling-box scene and click **Play simulation**. SOMA walks toward the
+cube and pushes it along the floor. **Pause animation** holds the current character
+pose while physics continues; **Play animation** resumes it. **Loop** repeats the
+clip; turn it off to hold the final pose. The **Time** slider scrubs and pauses
+animation, including while simulation is stopped. **Speed** scales playback while
+preserving the fixed physics timestep. **Reset** restores the character, skin,
+cube, and animation time.
+
+**Frame character** focuses the first character, and **Follow** moves the camera
+with it. **Info** reports its joint and collider counts. **Record movie** saves
+rendered frames to an MP4 through FFmpeg (which must be on PATH); **Stop recording**
+finalizes it. Recording excludes the GUI, advances time at 30 frames per second,
+and stops when the window is resized or a new scene is loaded.
 
 `resources/scenes/soma_walk.usda` contains a simple procedural test gait bound to
 SOMA's existing skeleton. `falling_box.usda` references it and authors the character's
@@ -118,7 +129,7 @@ intact and joint names have no special meaning.
 
 Generated geometry lives under each character's `__FbikBoneColliders` Xform in
 an in-memory layer. It has kinematic rigid-body and collision APIs and becomes part of the
-shared simulation on Start. Use **Show bone colliders** to inspect the shapes.
+shared simulation on Play simulation. Use **Show bone colliders** to inspect the shapes.
 SOMA produces 61 convex meshes and omits 16 leaf joints. Reinitializing replaces the
 module's generated layer. Source USD files are never changed.
 
@@ -141,7 +152,8 @@ ctest --test-dir build -C Release --output-on-failure
 ```
 
 The GPU test checks USD loading, rendered output, resize, failed-load recovery,
-reload, visible simulation motion/reset, and the ImGui/OpenGL backend. It needs a working GPU session.
+reload, visible simulation motion/reset, timeline seeking/looping, character framing,
+and the ImGui/OpenGL backend. Movie recorder tests exercise MP4 output and encoder failures. It needs a working GPU session.
 The CPU physics test verifies gravity, ground contact, child transforms, exact
 reset, repeatable trajectories, ray picking, dragging, collision resistance, and release. The small
 cube under `tests/data` is a test fixture, not a startup demo. The FBIK test covers
@@ -152,3 +164,9 @@ visible cube displacement during the walk.
 
 See [project.md](project.md) for the future ovphysx direction and
 [source provenance](third_party/PROVENANCE.md) for copied components and licenses.
+
+For a hidden-window GUI capture (including the panel):
+
+```bat
+build\Release\fbik_viewer.exe --scene resources\scenes\falling_box.usda --frames 8 --screenshot build\gui.ppm
+```

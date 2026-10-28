@@ -75,6 +75,24 @@ int main(int argc, char **argv)
             rtx.load(file, 640, 480);
             rtx.render(camera, 640, 480);
             rtx.load((root / "resources/scenes/falling_box.usda").u8string(), 640, 480);
+            require(rtx.characterJointCount() > 0 && rtx.characterRadius() > 0,
+                    "Character framing data is missing");
+            require(std::abs(rtx.animationStart()) < 1e-6 && std::abs(rtx.animationEnd() - 8) < 1e-6,
+                    "Timeline did not read the USD time range in seconds");
+            const auto initialCharacter = rtx.characterCenter();
+            rtx.seekAnimation(4);
+            require(!rtx.simulating() && std::abs(rtx.animationTime() - 4) < 1e-6,
+                    "Scrubbing started physics or failed to update time");
+            require((rtx.characterCenter() - initialCharacter).magnitude() > 1,
+                    "Scrubbing did not update character framing/follow position");
+            rtx.showBoneColliders(true);
+            rtx.render(camera, 640, 480);
+            require(std::abs(rtx.animationTime() - 4) < 1e-6, "Rendering advanced a paused timeline");
+            rtx.stopSimulation();
+            require(std::abs(rtx.animationTime()) < 1e-6 &&
+                    (rtx.characterCenter() - initialCharacter).magnitude() < 1e-4,
+                    "Reset did not restore a scrubbed character without physics");
+            rtx.showBoneColliders(false);
             camera.look_at(viewer::Vec3(9, 7, 10), viewer::Vec3(0, 1.5f, 0));
             const auto boxHeightInImage = [&] {
                 for (int i = 0; i < 4; ++i) rtx.render(camera, 640, 480);
@@ -165,6 +183,20 @@ int main(int argc, char **argv)
             rtx.stopSimulation();
             require(std::abs(boxHeightInImage()-startY)<3,"Stop simulation did not reset the scene");
             require(!rtx.animating(),"Stopping physics left animation active");
+            std::cout << "Checking timeline loop and final-pose hold.\n" << std::flush;
+            rtx.startSimulation();
+            rtx.setAnimationLoop(true);
+            rtx.seekAnimation(rtx.animationEnd() - 0.005);
+            rtx.startAnimation();
+            rtx.stepSimulation();
+            require(rtx.animating() && rtx.animationTime() < 0.02, "Loop did not wrap to the clip start");
+            rtx.setAnimationLoop(false);
+            rtx.seekAnimation(rtx.animationEnd() - 0.005);
+            rtx.stepSimulation();
+            require(!rtx.animating() && std::abs(rtx.animationTime() - rtx.animationEnd()) < 1e-6,
+                    "Non-looping playback did not hold its final pose");
+            rtx.stopSimulation();
+            std::cout << "Timeline loop and final-pose hold passed.\n" << std::flush;
             rtx.startSimulation();
             rtx.stepSimulation();
             require(rtx.beginDrag({{0, 4, 6}, {0, 0, -1}}), "Grab before scene replacement failed");

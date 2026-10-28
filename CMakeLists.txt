@@ -50,7 +50,7 @@ add_library(viewer_ui STATIC
 target_include_directories(viewer_ui PUBLIC third_party/imgui src/viewer)
 target_link_libraries(viewer_ui PUBLIC glfw OpenGL::GL)
 
-add_executable(fbik_viewer src/viewer/main.cpp src/viewer/FileDialog.cpp)
+add_executable(fbik_viewer src/viewer/main.cpp src/viewer/FileDialog.cpp src/viewer/MovieRecorder.cpp)
 target_link_libraries(fbik_viewer PRIVATE viewer_core viewer_ui shell32 ole32)
 add_custom_command(TARGET fbik_viewer POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/resources/fonts"
@@ -59,6 +59,10 @@ add_custom_command(TARGET fbik_viewer POST_BUILD
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(movie_recorder_tests tests/movie_recorder_tests.cpp src/viewer/MovieRecorder.cpp)
+    target_include_directories(movie_recorder_tests PRIVATE src/viewer)
+    add_test(NAME movie_recorder COMMAND movie_recorder_tests "${CMAKE_CURRENT_BINARY_DIR}/movie-tests-$<CONFIG>")
+    set_tests_properties(movie_recorder PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
     add_executable(recent_files_tests tests/recent_files_tests.cpp src/viewer/RecentFiles.cpp)
     target_include_directories(recent_files_tests PRIVATE src/viewer)
     add_test(NAME recent_files COMMAND recent_files_tests "${CMAKE_CURRENT_BINARY_DIR}/recent-tests-$<CONFIG>")

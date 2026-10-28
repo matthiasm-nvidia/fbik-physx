@@ -22,6 +22,14 @@ class RtxView
     void startAnimation();
     void stopAnimation();
     bool animating() const;
+    double animationStart() const;
+    double animationEnd() const;
+    double animationTime() const;
+    void seekAnimation(double seconds);
+    void setAnimationLoop(bool loop);
+    size_t characterJointCount() const;
+    Vec3 characterCenter() const;
+    float characterRadius() const;
     void startSimulation();
     void stopSimulation();
     void stepSimulation();

@@ -19,8 +19,11 @@ Bundled dependencies:
 
 ovstage and ovrtx are pinned in `dependencies.json` and installed under ignored
 `deps` directories with their distributed licenses and third-party notices.
-No animation, solver, collision, ragdoll, recording, or physics-demo implementation
-was imported.
+No animation, solver, collision, ragdoll, or physics-demo implementation was imported
+in the viewer foundation. The GUI alignment later imports `MovieRecorder.{h,cpp}`
+and its test from `D:\git\fbik` revision
+`9600c79d520815dda9d6118cf37a42935b3a6157`, and adapts its MP4 file dialog and
+panel layout. Recording launches FFmpeg from PATH and does not bundle its SDK.
 
 ## Character geometry
 

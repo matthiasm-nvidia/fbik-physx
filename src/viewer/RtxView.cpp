@@ -108,8 +108,10 @@ struct Scene
     fbik::Module characterPhysics;
     Skinning skinning;
     fbik::InitResult characterStats;
-    bool showBones = false, animationPlaying = false;
-    double animationTime = 0;
+    bool showBones = false, animationPlaying = false, animationLoop = false;
+    double animationTime = 0, animationStart = 0, animationEnd = 0;
+    Vec3 characterCenter{0, 0, 0};
+    float characterRadius = 1;
     ~Scene()
     {
         physics.reset();
@@ -163,6 +165,54 @@ struct Scene
         ovx_string_or_token_t attribute{};
         attribute.string = lit(name);
         stageWait(stage, ovstage_write_attribute(stage, query, attribute, ordinal, payload, OVSTAGE_PRIM_MODE_UPSERT));
+    }
+    void sample(double seconds)
+    {
+        const auto poses = sampleAnimation(stage, ordinal, seconds, characterPhysics.characters());
+        skinning.update(poses, ordinal);
+        const auto targets = characterPhysics.updateTargets(poses);
+        if (physics)
+            physics->setKinematicTargets(targets, ordinal);
+        else if (!targets.empty())
+        {
+            // Resolve every query before opening a write ordinal. Fetching a new
+            // query between writes can wait for that ordinal to be sealed.
+            std::vector<ovstage_query_handle_t> queries;
+            for (const auto &target : targets)
+                queries.push_back(query(target.path.c_str()));
+            try
+            {
+                ++ordinal;
+                for (size_t i = 0; i < targets.size(); ++i)
+                {
+                    auto local = targets[i].local;
+                    write(queries[i], "omni:xform", local.data(), kDLFloat, 64, 16, OVSTAGE_SEMANTIC_MATRIX);
+                }
+                seal();
+            }
+            catch (...)
+            {
+                for (auto handle : queries) ovstage_release_query(stage, handle);
+                throw;
+            }
+            for (auto handle : queries) stageWait(stage, ovstage_release_query(stage, handle));
+            viewer::stage::hierarchy(stage, ordinal);
+        }
+        if (!poses.empty() && !poses.front().bones.empty())
+        {
+            const auto &pose = poses.front();
+            const auto jointPosition = [&](const fbik::Matrix4 &bone) {
+                const auto &m = pose.characterWorld;
+                return Vec3(float(bone[12]*m[0] + bone[13]*m[4] + bone[14]*m[8] + m[12]),
+                            float(bone[12]*m[1] + bone[13]*m[5] + bone[14]*m[9] + m[13]),
+                            float(bone[12]*m[2] + bone[13]*m[6] + bone[14]*m[10] + m[14]));
+            };
+            characterCenter = jointPosition(pose.bones[pose.bones.size() > 1 ? 1 : 0]);
+            characterRadius = 0.001f;
+            for (const auto &bone : pose.bones)
+                characterRadius = std::max(characterRadius, (jointPosition(bone) - characterCenter).magnitude() * 1.15f);
+        }
+        animationTime = seconds;
     }
 };
 
@@ -442,7 +492,8 @@ void RtxView::load(const std::string &path, int width, int height)
     ovstage_instance_desc_t desc{};
     desc.name = "fbik-physx-viewer";
     stageCheck(ovstage_create_instance(&desc, &candidate->stage), "Create stage");
-    const ovx_string_t metadata[] = {lit("upAxis"), lit("metersPerUnit")};
+    const ovx_string_t metadata[] = {lit("upAxis"), lit("metersPerUnit"), lit("startTimeCode"),
+                                   lit("endTimeCode"), lit("timeCodesPerSecond")};
     ovstage_population_desc_t population{};
     population.domains = OVSTAGE_POPULATION_DOMAIN_ALL;
     std::vector<ovx_string_t> properties;
@@ -464,10 +515,23 @@ void RtxView::load(const std::string &path, int width, int height)
     population.selectors = &selector;
     population.selector_count = 1;
     population.stage_metadata_paths = metadata;
-    population.stage_metadata_path_count = 2;
+    population.stage_metadata_path_count = std::size(metadata);
     populationWait(candidate->stage, ovstage_population_open_usd_from_file_with_desc(
                                          candidate->stage, str(path), candidate->ordinal, 0, &population, 1));
     candidate->seal();
+    const auto timing = stage::read(candidate->stage, candidate->ordinal,
+        {"usd-metadata:startTimeCode", "usd-metadata:endTimeCode", "usd-metadata:timeCodesPerSecond"});
+    double start = 0, end = 0, rate = 24;
+    for (const auto &[primPath, prim] : timing)
+        for (const auto &[name, value] : prim)
+            if (!value.numbers.empty() && std::isfinite(value.numbers.front()))
+            {
+                if (name == "usd-metadata:startTimeCode") start = value.numbers.front();
+                if (name == "usd-metadata:endTimeCode") end = value.numbers.front();
+                if (name == "usd-metadata:timeCodesPerSecond" && value.numbers.front() > 0) rate = value.numbers.front();
+            }
+    candidate->animationStart = start / rate;
+    candidate->animationEnd = std::max(start, end) / rate;
     stageWait(candidate->stage,
               ovstage_compute_hierarchy(candidate->stage, OVSTAGE_HIERARCHY_COMPUTATION_MODEL_DEFAULT_CPU,
                                         candidate->ordinal, candidate->ordinal + 1));
@@ -496,8 +560,7 @@ void RtxView::load(const std::string &path, int width, int height)
                    ovstage_population_add_usd_reference_from_string(candidate->stage, str(layer), lit("/"), nullptr));
     populationWait(candidate->stage, ovstage_population_apply_usd_changes(candidate->stage, ++candidate->ordinal));
     candidate->seal();
-    if (!candidate->characterPhysics.characters().empty())
-        candidate->skinning.update(sampleAnimation(candidate->stage,candidate->ordinal,0,candidate->characterPhysics.characters()),candidate->ordinal);
+    candidate->sample(candidate->animationStart);
     candidate->camera = candidate->query((candidate->viewerRoot + "/Camera").c_str());
     candidate->product = candidate->query((candidate->viewerRoot + "/View").c_str());
     if (impl->attached)
@@ -666,6 +729,25 @@ void RtxView::stopAnimation()
 }
 bool RtxView::animating() const { return impl->scene && impl->scene->animationPlaying; }
 
+double RtxView::animationStart() const { return impl->scene ? impl->scene->animationStart : 0; }
+double RtxView::animationEnd() const { return impl->scene ? impl->scene->animationEnd : 0; }
+double RtxView::animationTime() const { return impl->scene ? impl->scene->animationTime : 0; }
+void RtxView::seekAnimation(double seconds)
+{
+    if (!std::isfinite(seconds)) throw std::runtime_error("Invalid animation time.");
+    if (!impl->scene) return;
+    impl->scene->sample(std::clamp(seconds, animationStart(), animationEnd()));
+    impl->lastLens = {};
+}
+void RtxView::setAnimationLoop(bool loop) { if (impl->scene) impl->scene->animationLoop = loop; }
+size_t RtxView::characterJointCount() const
+{
+    return impl->scene && !impl->scene->characterPhysics.characters().empty()
+        ? impl->scene->characterPhysics.characters().front().joints.size() : 0;
+}
+Vec3 RtxView::characterCenter() const { return impl->scene ? impl->scene->characterCenter : Vec3(0, 0, 0); }
+float RtxView::characterRadius() const { return impl->scene ? impl->scene->characterRadius : 1; }
+
 void RtxView::startSimulation()
 {
     if (loaded() && !simulating())
@@ -673,28 +755,33 @@ void RtxView::startSimulation()
 }
 void RtxView::stopSimulation()
 {
+    if (!impl->scene) return;
     if (simulating())
     {
         impl->scene->physics->stop(impl->scene->ordinal);
         impl->scene->physics.reset();
-        if (!impl->scene->characterPhysics.characters().empty()) {
-            impl->scene->skinning.update(sampleAnimation(impl->scene->stage,impl->scene->ordinal,0,impl->scene->characterPhysics.characters()),impl->scene->ordinal);
-            impl->scene->animationPlaying=false;
-            impl->scene->animationTime=0;
-        }
-        impl->lastLens = {}; // Removing the temporary joint layer can refresh viewer attributes.
-
     }
+    impl->scene->animationPlaying = false;
+    impl->scene->sample(impl->scene->animationStart);
+    impl->lastLens = {}; // Removing the temporary joint layer can refresh viewer attributes.
 }
 void RtxView::stepSimulation()
 {
     if (!simulating()) return;
     auto &s=*impl->scene;
     if (s.animationPlaying) {
-        s.animationTime+=PhysicsSimulation::timeStep;
-        auto poses=sampleAnimation(s.stage,s.ordinal,s.animationTime,s.characterPhysics.characters());
-        s.skinning.update(poses,s.ordinal);
-        s.physics->setKinematicTargets(s.characterPhysics.updateTargets(poses),s.ordinal);
+        double time = s.animationTime + PhysicsSimulation::timeStep;
+        if (s.animationEnd > s.animationStart && time > s.animationEnd)
+        {
+            if (s.animationLoop)
+                time = s.animationStart + std::fmod(time - s.animationStart, s.animationEnd - s.animationStart);
+            else
+            {
+                time = s.animationEnd;
+                s.animationPlaying = false;
+            }
+        }
+        s.sample(time);
     }
     s.physics->step(s.ordinal);
 }

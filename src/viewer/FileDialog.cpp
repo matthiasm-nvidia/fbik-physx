@@ -9,22 +9,30 @@
 #include <filesystem>
 #include <stdexcept>
 
-std::string selectUsdFile(GLFWwindow *owner)
+static std::string selectFile(GLFWwindow *owner, bool saveMovie)
 {
     const HRESULT initialized = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     if (FAILED(initialized) && initialized != RPC_E_CHANGED_MODE)
         throw std::runtime_error("Could not initialize the file dialog.");
-    IFileOpenDialog *dialog = nullptr;
-    HRESULT result = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog));
+    IFileDialog *dialog = nullptr;
+    HRESULT result = CoCreateInstance(saveMovie ? CLSID_FileSaveDialog : CLSID_FileOpenDialog, nullptr,
+                                      CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog));
     std::string selected;
     if (SUCCEEDED(result))
     {
         const COMDLG_FILTERSPEC filters[] = {{L"USD stages", L"*.usd;*.usda;*.usdc;*.usdz"}};
-        dialog->SetFileTypes(1, filters);
-        dialog->SetTitle(L"Load USD stage");
+        const COMDLG_FILTERSPEC movies[] = {{L"MP4 movie", L"*.mp4"}};
+        dialog->SetFileTypes(1, saveMovie ? movies : filters);
+        dialog->SetTitle(saveMovie ? L"Record MP4 movie" : L"Load USD stage");
+        if (saveMovie)
+        {
+            dialog->SetDefaultExtension(L"mp4");
+            dialog->SetFileName(L"recording.mp4");
+        }
         DWORD options = 0;
         dialog->GetOptions(&options);
-        dialog->SetOptions(options | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST | FOS_FORCEFILESYSTEM);
+        dialog->SetOptions(options | (saveMovie ? FOS_OVERWRITEPROMPT : FOS_FILEMUSTEXIST) |
+                           FOS_PATHMUSTEXIST | FOS_FORCEFILESYSTEM);
         result = dialog->Show(glfwGetWin32Window(owner));
         if (SUCCEEDED(result))
         {
@@ -50,3 +58,6 @@ std::string selectUsdFile(GLFWwindow *owner)
         throw std::runtime_error("The file dialog failed.");
     return selected;
 }
+
+std::string selectUsdFile(GLFWwindow *owner) { return selectFile(owner, false); }
+std::string selectMovieFile(GLFWwindow *owner) { return selectFile(owner, true); }

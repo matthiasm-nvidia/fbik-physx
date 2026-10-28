@@ -1,6 +1,7 @@
 #define NOMINMAX
 #include "Camera.h"
 #include "FileDialog.h"
+#include "MovieRecorder.h"
 #include "RtxView.h"
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
@@ -11,6 +12,7 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <iterator>
 #include <stdexcept>
 #include <string>
@@ -29,6 +31,8 @@ struct Viewer
     int mouseX = 0, mouseY = 0;
     std::string pendingLoad, inputError;
     viewer::RtxView *rtx = nullptr;
+    bool playing = false, animationPlaying = true, loop = true, follow = false;
+    float playbackSpeed = 1;
 };
 Viewer &state(GLFWwindow *window)
 {
@@ -52,6 +56,33 @@ void frameScene(Viewer &v)
     v.camera.up.normalize();
     v.camera.speed = std::max(0.0001f, v.sceneRadius * 0.05f);
 }
+void frameCharacter(Viewer &v)
+{
+    if (!v.rtx || !v.rtx->characterJointCount()) return;
+    Viewer focused = v;
+    focused.sceneCenter = v.rtx->characterCenter();
+    focused.sceneRadius = v.rtx->characterRadius();
+    frameScene(focused);
+    v.camera = focused.camera;
+    v.orbitCenter = focused.orbitCenter;
+}
+void preparePlayback(Viewer &v)
+{
+    if (!v.rtx || !v.rtx->loaded()) return;
+    v.rtx->startSimulation();
+    v.rtx->setAnimationLoop(v.loop);
+    if (v.animationPlaying) v.rtx->startAnimation();
+    else v.rtx->stopAnimation();
+}
+void sameLineIfFits(const char *label, bool checkbox = false)
+{
+    const auto &style = ImGui::GetStyle();
+    const float width = ImGui::CalcTextSize(label).x +
+        (checkbox ? ImGui::GetFontSize() + 2 * style.FramePadding.y + style.ItemInnerSpacing.x : 2 * style.FramePadding.x);
+    if (ImGui::GetItemRectMax().x + style.ItemSpacing.x + width <=
+        ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x)
+        ImGui::SameLine();
+}
 void keyCallback(GLFWwindow *w, int key, int scancode, int action, int mods)
 {
     if (key < 0 || key >= static_cast<int>(std::size(ImGui::GetIO().KeysDown)))
@@ -65,6 +96,20 @@ void keyCallback(GLFWwindow *w, int key, int scancode, int action, int mods)
             glfwSetWindowShouldClose(w, GLFW_TRUE);
         else if (key == GLFW_KEY_HOME)
             frameScene(state(w));
+        else if (key == GLFW_KEY_SPACE && action == GLFW_PRESS)
+        {
+            auto &v = state(w);
+            try
+            {
+                if (v.rtx && v.rtx->loaded())
+                {
+                    if (!v.playing) preparePlayback(v);
+                    else v.rtx->endDrag();
+                    v.playing = !v.playing;
+                }
+            }
+            catch (const std::exception &e) { v.inputError = e.what(); }
+        }
         else
             state(w).camera.handle_key_down(key);
     }
@@ -94,8 +139,10 @@ void mouseCallback(GLFWwindow *w, int button, int action, int mods)
         try
         {
             if (action == GLFW_RELEASE) v.rtx->endDrag(); // Release also over ImGui.
-            else if (action == GLFW_PRESS && !ImGui::GetIO().WantCaptureMouse)
-                v.rtx->beginDrag(cursorRay(w, x, y));
+            else if (action == GLFW_PRESS && (mods & GLFW_MOD_SHIFT) && !ImGui::GetIO().WantCaptureMouse)
+            {
+                if (v.rtx->beginDrag(cursorRay(w, x, y))) v.playing = true;
+            }
         }
         catch (const std::exception &e) { v.inputError = e.what(); }
     }
@@ -159,13 +206,15 @@ void drawImage(GLuint texture, int width, int height, const std::vector<uint8_t>
     glBindTexture(GL_TEXTURE_2D, 0);
     glDisable(GL_TEXTURE_2D);
 }
-constexpr const char *usage = "Usage: fbik_viewer [--scene file.usd] [--help]\n";
+constexpr const char *usage = "Usage: fbik_viewer [--scene file.usd] [--frames count] [--screenshot image.ppm] [--help]\n";
 } // namespace
 
 int wmain(int argc, wchar_t **argv)
 {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     std::string scenePath;
+    std::filesystem::path screenshotPath;
+    int frameLimit = 0;
     try
     {
         for (int i = 1; i < argc; ++i)
@@ -178,9 +227,19 @@ int wmain(int argc, wchar_t **argv)
             }
             if (arg == L"--scene" && i + 1 < argc)
                 scenePath = std::filesystem::absolute(argv[++i]).u8string();
+            else if (arg == L"--frames" && i + 1 < argc)
+            {
+                const std::wstring value = argv[++i];
+                size_t used = 0;
+                frameLimit = std::stoi(value, &used);
+                if (used != value.size() || frameLimit <= 0) throw std::runtime_error("Invalid frame count.");
+            }
+            else if (arg == L"--screenshot" && i + 1 < argc)
+                screenshotPath = std::filesystem::absolute(argv[++i]);
             else
-                throw std::runtime_error("Unknown argument or missing --scene path.");
+                throw std::runtime_error("Unknown argument or missing value.");
         }
+        if (!screenshotPath.empty() && !frameLimit) frameLimit = 8;
     }
     catch (const std::exception &e)
     {
@@ -192,6 +251,9 @@ int wmain(int argc, wchar_t **argv)
     if (!length || length == 32768)
         return 1;
     const auto executableDirectory = std::filesystem::path(executablePath).parent_path();
+    const std::string demoPaths[] = {(executableDirectory / "resources/scenes/falling_box.usda").u8string()};
+    const char *demoNames[] = {"Falling box"};
+    static_assert(std::size(demoPaths) == std::size(demoNames));
     viewer::RecentFiles recent(executableDirectory / "../../.cache/recent-usd.txt");
 
     glfwSetErrorCallback([](int code, const char *message) { std::fprintf(stderr, "GLFW %d: %s\n", code, message); });
@@ -200,6 +262,7 @@ int wmain(int argc, wchar_t **argv)
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_COMPAT_PROFILE);
+    if (frameLimit) glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
     viewer::imgui_theme::init_ui_scale();
     const float scale = viewer::imgui_theme::ui_scale();
     GLFWwindow *window = glfwCreateWindow(int(1600 * scale), int(1000 * scale), "FBIK PhysX - USD Viewer", nullptr, nullptr);
@@ -226,6 +289,9 @@ int wmain(int argc, wchar_t **argv)
     glfwSetScrollCallback(window, scrollCallback);
     glfwSetCursorPosCallback(window, cursorCallback);
     glfwSetWindowFocusCallback(window, focusCallback);
+    glfwSetDropCallback(window, [](GLFWwindow *w, int count, const char **paths) {
+        if (count > 0) state(w).pendingLoad = paths[0];
+    });
     GLuint texture = 0;
     glGenTextures(1, &texture);
     int exitCode = 0;
@@ -236,6 +302,19 @@ int wmain(int argc, wchar_t **argv)
         std::string error;
         bool renderFailed = false;
         double previousTime = glfwGetTime(), accumulator = 0;
+        viewer::Vec3 followCenter{0, 0, 0};
+        MovieRecorder recorder;
+        std::string recordingStatus;
+        bool recordingSavedPopupPending = false;
+        double recordingSavedPopupUntil = 0;
+        int frames = 0;
+        const auto stopRecording = [&] {
+            if (!recorder.active()) return;
+            const auto path = recorder.path();
+            recorder.stop();
+            recordingStatus = "Saved " + path;
+            recordingSavedPopupPending = true;
+        };
         while (!glfwWindowShouldClose(window))
         {
             glfwPollEvents();
@@ -243,6 +322,7 @@ int wmain(int argc, wchar_t **argv)
             {
                 error = v.inputError;
                 v.inputError.clear();
+                v.playing = false;
                 try { rtx.stopSimulation(); }
                 catch (const std::exception &e) { error += std::string("\n") + e.what(); renderFailed = true; }
             }
@@ -258,9 +338,12 @@ int wmain(int argc, wchar_t **argv)
             const double now = glfwGetTime();
             const double elapsed = std::min(now - previousTime, 0.1);
             previousTime = now;
-            if (rtx.simulating() && !renderFailed)
+            if (recorder.active() && (width != recorder.width() || height != recorder.height()))
+                try { stopRecording(); }
+                catch (const std::exception &e) { error = e.what(); }
+            if (v.playing && rtx.simulating() && !renderFailed)
             {
-                accumulator += elapsed;
+                accumulator += (recorder.active() ? (recorder.frames() ? 1.0 / recorder.fps() : 0) : elapsed) * v.playbackSpeed;
                 try
                 {
                     while (accumulator >= 1.0 / 60.0)
@@ -268,14 +351,27 @@ int wmain(int argc, wchar_t **argv)
                         rtx.stepSimulation();
                         accumulator -= 1.0 / 60.0;
                     }
+                    v.animationPlaying = rtx.animating();
                 }
                 catch (const std::exception &e)
                 {
                     error = e.what();
+                    v.playing = false;
                     try { rtx.stopSimulation(); }
                     catch (const std::exception &reset) { error += std::string("\nReset failed: ") + reset.what(); renderFailed = true; }
                     accumulator = 0;
                 }
+            }
+            else accumulator = 0;
+            if (rtx.characterJointCount())
+            {
+                const auto center = rtx.characterCenter();
+                if (v.follow)
+                {
+                    v.camera.pos += center - followCenter;
+                    v.orbitCenter += center - followCenter;
+                }
+                followCenter = center;
             }
             glViewport(0, 0, width, height);
             glClearColor(0.055f, 0.065f, 0.075f, 1);
@@ -291,15 +387,20 @@ int wmain(int argc, wchar_t **argv)
                 {
                     error = e.what();
                     renderFailed = true;
+                    v.playing = false;
                     std::fprintf(stderr, "%s\n", e.what());
                 }
             }
             ImGui_ImplGLFW_NewFrame();
             const auto ui = viewer::imgui_theme::ui;
             ImGui::SetNextWindowPos(ImVec2(ui(16), ui(16)), ImGuiCond_FirstUseEver);
-            ImGui::SetNextWindowSize(ImVec2(ui(420), ui(260)), ImGuiCond_FirstUseEver);
-            ImGui::SetNextWindowSizeConstraints(ImVec2(ui(420), 0), ImVec2(ui(420), FLT_MAX));
-            ImGui::Begin("USD Viewer", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+            const float panelWidth = 330 * 0.7f * scale;
+            ImGui::SetNextWindowSizeConstraints(ImVec2(panelWidth, 0), ImVec2(panelWidth, FLT_MAX));
+            const auto sceneName = rtx.loaded()
+                ? "FBIK Viewer - " + std::filesystem::u8path(rtx.path()).filename().u8string()
+                : std::string("FBIK Viewer");
+            const auto panelTitle = sceneName + "###FBIK Viewer";
+            ImGui::Begin(panelTitle.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize);
             if (ImGui::Button("Load USD..."))
             {
                 try
@@ -317,7 +418,7 @@ int wmain(int argc, wchar_t **argv)
                 }
             }
             ImGui::SameLine();
-            if (ImGui::Button("Recent USD"))
+            if (ImGui::Button("Recent"))
                 ImGui::OpenPopup("Recent USD files");
             if (ImGui::BeginPopup("Recent USD files"))
             {
@@ -335,53 +436,187 @@ int wmain(int argc, wchar_t **argv)
                 }
                 ImGui::EndPopup();
             }
-            if (ImGui::Button("Load falling box"))
-                v.pendingLoad = (executableDirectory / "resources/scenes/falling_box.usda").u8string();
+            int selectedDemo = -1;
+            for (int i = 0; i < int(std::size(demoPaths)); ++i)
+                if (rtx.loaded() && std::filesystem::u8path(rtx.path()) == std::filesystem::u8path(demoPaths[i]))
+                    selectedDemo = i;
+            ImGui::PushItemWidth(-1);
+            if (ImGui::Combo("##Scene selection", &selectedDemo, demoNames, int(std::size(demoNames))))
+                v.pendingLoad = demoPaths[selectedDemo];
+            ImGui::PopItemWidth();
             if (rtx.loaded())
             {
-                ImGui::TextWrapped("%s", rtx.path().c_str());
-                if (rtx.boneColliderCount())
-                {
-                    bool show = rtx.boneCollidersVisible();
-                    if (ImGui::Checkbox("Show bone colliders", &show))
-                        try { rtx.showBoneColliders(show); }
-                        catch (const std::exception &e) { error = e.what(); }
-                    ImGui::Text("%zu kinematic bone bodies", rtx.boneColliderCount());
-                    if (!rtx.simulating()) ImGui::TextDisabled("Start simulation to enable animation.");
-                    if (rtx.simulating() && ImGui::Button(rtx.animating() ? "Stop animation" : "Start animation")) {
-                        try {
-                            if (rtx.animating()) rtx.stopAnimation();
-                            else if (!renderFailed) rtx.startAnimation();
-                            error.clear();
-                        } catch (const std::exception &e) { error=e.what(); }
-                    }
-                }
-                if (ImGui::Button("Frame stage"))
-                    frameScene(v);
-                if (ImGui::Button(rtx.simulating() ? "Stop simulation" : "Start simulation"))
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", rtx.path().c_str());
+                if (ImGui::Button("Reload")) v.pendingLoad = rtx.path();
+                ImGui::Separator();
+                const bool hasCharacter = rtx.characterJointCount() > 0;
+                if (ImGui::CollapsingHeader("Scene", ImGuiTreeNodeFlags_DefaultOpen))
                 {
                     try
                     {
-                        if (rtx.simulating()) rtx.stopSimulation();
-                        else if (!renderFailed) rtx.startSimulation();
-                        error.clear();
+                        if (ImGui::Button(v.playing ? "Pause simulation" : "Play simulation"))
+                        {
+                            if (!v.playing && !renderFailed) preparePlayback(v);
+                            else rtx.endDrag();
+                            v.playing = !v.playing && !renderFailed;
+                            previousTime = glfwGetTime();
+                            accumulator = 0;
+                        }
+                        sameLineIfFits("Reset");
+                        if (ImGui::Button("Reset"))
+                        {
+                            rtx.stopSimulation();
+                            v.animationPlaying = true;
+                            if (v.playing && !renderFailed) preparePlayback(v);
+                            accumulator = 0;
+                            previousTime = glfwGetTime();
+                        }
+                        sameLineIfFits("Step");
+                        if (ImGui::Button("Step") && !renderFailed)
+                        {
+                            v.playing = false;
+                            rtx.endDrag();
+                            preparePlayback(v);
+                            rtx.stepSimulation();
+                            v.animationPlaying = rtx.animating();
+                            accumulator = 0;
+                        }
+                        if (hasCharacter)
+                        {
+                            if (ImGui::Button(v.animationPlaying ? "Pause animation" : "Play animation"))
+                            {
+                                v.animationPlaying = !v.animationPlaying;
+                                if (v.animationPlaying) rtx.startAnimation();
+                                else rtx.stopAnimation();
+                            }
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("Hold the current animation pose while simulation continues.");
+                            sameLineIfFits("Loop", true);
+                            if (ImGui::Checkbox("Loop", &v.loop)) rtx.setAnimationLoop(v.loop);
+                            float time = float(rtx.animationTime());
+                            ImGui::PushItemWidth(210 * 0.7f * scale);
+                            const bool seek = ImGui::SliderFloat("Time", &time, float(rtx.animationStart()),
+                                                               float(rtx.animationEnd()), "%.2f s");
+                            ImGui::PopItemWidth();
+                            if (seek)
+                            {
+                                v.animationPlaying = false;
+                                rtx.stopAnimation();
+                                rtx.seekAnimation(time);
+                            }
+                        }
+                        ImGui::PushItemWidth(210 * 0.7f * scale);
+                        ImGui::SliderFloat("Speed", &v.playbackSpeed, 0.1f, 2.0f, "%.2fx");
+                        ImGui::PopItemWidth();
+                        if (hasCharacter)
+                        {
+                            bool show = rtx.boneCollidersVisible();
+                            if (ImGui::Checkbox("Show bone colliders", &show)) rtx.showBoneColliders(show);
+                        }
+                        if (ImGui::Button("Frame stage")) frameScene(v);
+                        if (ImGui::Button("Frame character") && hasCharacter) frameCharacter(v);
+                        if (!hasCharacter && ImGui::IsItemHovered())
+                            ImGui::SetTooltip("The current scene has no character.");
+                        sameLineIfFits("Follow", true);
+                        bool follow = hasCharacter && v.follow;
+                        if (ImGui::Checkbox("Follow", &follow) && hasCharacter) v.follow = follow;
+                        if (!hasCharacter && ImGui::IsItemHovered())
+                            ImGui::SetTooltip("The current scene has no character.");
+                        if (ImGui::Button(recorder.active() ? "Stop recording" : "Record movie"))
+                        {
+                            if (recorder.active()) stopRecording();
+                            else if (!renderFailed)
+                            {
+                                const auto path = selectMovieFile(window);
+                                if (!path.empty())
+                                {
+                                    recorder.start(path, width, height, 30, false);
+                                    recordingStatus.clear();
+                                    error.clear();
+                                }
+                            }
+                            previousTime = glfwGetTime();
+                            accumulator = 0;
+                        }
                     }
-                    catch (const std::exception &e) { error = e.what(); }
-                    accumulator = 0;
-                    previousTime = glfwGetTime();
+                    catch (const std::exception &e)
+                    {
+                        error = e.what();
+                        v.playing = false;
+                    }
+                }
+                if (hasCharacter)
+                {
+                    ImGui::Separator();
+                    if (ImGui::CollapsingHeader("Info"))
+                    {
+                        ImGui::Text("Character: %zu joints", rtx.characterJointCount());
+                        ImGui::Text("Mapped: %zu bodies", rtx.boneColliderCount());
+                        ImGui::TextWrapped("Kinematic bone bodies follow the animation.");
+                    }
                 }
             }
-            else
-                ImGui::TextWrapped("Load a USD file to view it.");
+            ImGui::Separator();
+            if (ImGui::CollapsingHeader("Camera controls"))
+                ImGui::TextWrapped("Shift + left drag: grab object and resume\nLeft drag: orbit\nRight drag: "
+                                       "look\nMiddle drag: pan\nWheel: move\n"
+                                       "W/A/S/D, Q/E: move\nSpace: play/pause\nHome: frame | Escape: close");
+            ImGui::TextUnformatted("Drop a USD file to load it.");
             if (!v.pendingLoad.empty())
                 ImGui::TextWrapped("Loading USD... First RTX initialization may take several minutes.");
             if (!error.empty())
+            {
+                ImGui::Separator();
                 ImGui::TextWrapped("%s", error.c_str());
-            ImGui::Separator();
-            ImGui::TextWrapped("Left drag: pick body (running) or orbit | Right drag: look | Middle drag: pan\nWheel: move | W/A/S/D, Q/E: move | Home: frame");
+            }
+            if (recordingSavedPopupPending)
+            {
+                ImGui::OpenPopup("Movie saved");
+                recordingSavedPopupUntil = glfwGetTime() + 5;
+                recordingSavedPopupPending = false;
+            }
+            if (ImGui::BeginPopup("Movie saved"))
+            {
+                ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ui(360));
+                ImGui::TextWrapped("%s", recordingStatus.c_str());
+                ImGui::PopTextWrapPos();
+                if (ImGui::Button("OK") || glfwGetTime() >= recordingSavedPopupUntil)
+                    ImGui::CloseCurrentPopup();
+                ImGui::EndPopup();
+            }
             ImGui::End();
             ImGui::Render();
             ImGui_ImplGLFW_RenderDrawData(ImGui::GetDrawData());
+            if (frameLimit && v.pendingLoad.empty() && ++frames >= frameLimit)
+            {
+                if (!error.empty()) throw std::runtime_error(error);
+                if (!screenshotPath.empty())
+                {
+                    std::vector<uint8_t> rgb(size_t(width) * height * 3);
+                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                    glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, rgb.data());
+                    std::ofstream output(screenshotPath, std::ios::binary);
+                    output << "P6\n" << width << ' ' << height << "\n255\n";
+                    for (int y = height - 1; y >= 0; --y)
+                        output.write(reinterpret_cast<const char *>(rgb.data() + size_t(y) * width * 3), width * 3);
+                    if (!output) throw std::runtime_error("Could not write the GUI screenshot.");
+                }
+                glfwSetWindowShouldClose(window, GLFW_TRUE);
+            }
+            if (recorder.active())
+            {
+                try
+                {
+                    if (renderFailed) stopRecording();
+                    else recorder.write(rtx.pixels().data(), rtx.pixels().size());
+                }
+                catch (const std::exception &e)
+                {
+                    error = e.what();
+                    try { recorder.stop(); }
+                    catch (const std::exception &stop) { error += std::string("\n") + stop.what(); }
+                }
+            }
             glfwSwapBuffers(window);
 
             // Present loading feedback before synchronous SDK initialization and population.
@@ -394,9 +629,14 @@ int wmain(int argc, wchar_t **argv)
                 {
                     if (!std::filesystem::is_regular_file(std::filesystem::u8path(requested)))
                         throw std::runtime_error("USD file does not exist: " + requested);
+                    stopRecording();
                     rtx.initialize(executableDirectory.u8string());
                     rtx.load(requested, width, height);
                     renderFailed = false;
+                    v.playing = false;
+                    v.animationPlaying = true;
+                    rtx.setAnimationLoop(v.loop);
+                    followCenter = rtx.characterCenter();
                     v.sceneCenter = v.orbitCenter = rtx.center();
                     v.sceneRadius = rtx.radius();
                     v.zUp = rtx.zUp();
@@ -412,8 +652,11 @@ int wmain(int argc, wchar_t **argv)
                     else
                         frameScene(v);
                     error.clear();
-                    recent.add(requested);
-                    recent.save();
+                    if (!frameLimit)
+                    {
+                        recent.add(requested);
+                        recent.save();
+                    }
                     std::printf("Loaded USD: %s\n", requested.c_str());
                 }
                 catch (const std::exception &e)
@@ -421,13 +664,14 @@ int wmain(int argc, wchar_t **argv)
                     error = e.what();
                     std::fprintf(stderr, "%s\n", e.what());
                 }
-                const auto title = rtx.loaded() ? "FBIK PhysX - " + std::filesystem::u8path(rtx.path()).filename().u8string()
+                const auto title = rtx.loaded() ? "FBIK PhysX - " + std::filesystem::u8path(rtx.path()).make_preferred().u8string()
                                                 : "FBIK PhysX - USD Viewer";
                 glfwSetWindowTitle(window, title.c_str());
                 previousTime = glfwGetTime();
                 accumulator = 0;
             }
         }
+        stopRecording();
     }
     catch (const std::exception &e)
     {

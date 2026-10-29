@@ -222,7 +222,7 @@ int main(int argc, char **argv)
             rtx.seekAnimation(.5);
             const auto releaseCenter=rtx.characterCenter();
             rtx.setCharacterMode(fbik::Mode::Ragdoll);
-            require(!rtx.simulating() && rtx.boneJointCount()==60,"Selecting ragdoll started simulation or lost joints");
+            require(!rtx.simulating() && rtx.boneJointCount()==22,"Selecting ragdoll started simulation or lost joints");
             require((rtx.characterCenter()-releaseCenter).magnitude()<.001,"Selecting ragdoll changed the held pose");
             rtx.startSimulation();
             rtx.startAnimation();
@@ -232,6 +232,7 @@ int main(int argc, char **argv)
                 rtx.stepSimulation();
                 if(i%20==0) rtx.render(camera,640,480);
             }
+            std::cout << "Ragdoll center: " << releaseCenter.y << " -> " << rtx.characterCenter().y << '\n';
             require(rtx.characterCenter().y<releaseCenter.y-.3f,"Ragdoll framing did not follow the falling skeleton");
             rtx.render(camera,640,480);saveFrame("ragdoll.ppm");
             const auto heldCenter=rtx.characterCenter();
@@ -254,6 +255,19 @@ int main(int argc, char **argv)
             rtx.setCharacterMode(fbik::Mode::Follow);
             rtx.stopSimulation();rtx.showBoneColliders(false);
             std::cout << "Ragdoll playback, paused transitions, rendering and reset passed.\n" << std::flush;
+            rtx.setCharacterMode(fbik::Mode::QuasiStatic);
+            require(!rtx.simulating(),"Selecting quasi static started simulation");
+            rtx.startSimulation();rtx.startAnimation();rtx.seekAnimation(4);
+            require(!rtx.animating() && std::abs(rtx.animationTime())<1e-6,"Animation changed the quasi static pose/time");
+            for(int i=0;i<60;++i) rtx.stepSimulation();
+            rtx.render(camera,640,480);
+            require((rtx.characterCenter()-initialCharacter).magnitude()<.1,"Quasi static character fell or acquired momentum");
+            rtx.stopSimulation();
+            require(rtx.characterMode()==fbik::Mode::QuasiStatic &&
+                    (rtx.characterCenter()-initialCharacter).magnitude()<.001,"Reset lost quasi static mode or the start pose");
+            rtx.startSimulation();rtx.stepSimulation();rtx.setCharacterMode(fbik::Mode::Follow);
+            rtx.stopSimulation();
+            std::cout << "Quasi static playback, rendering and reset passed.\n" << std::flush;
             std::cout << "Restarting simulation before scene replacement.\n";
             rtx.startSimulation();
             std::cout << "Stepping before scene replacement.\n";

@@ -3,6 +3,7 @@
 #include "MeshTools/ConvexHull.h"
 #include "StageData.h"
 #include "SkeletonPose.h"
+#include "JointSetup.h"
 #include <ovx/path_dictionary/path_dictionary_utils.h>
 #include <algorithm>
 #include <cmath>
@@ -44,7 +45,40 @@ void pose(std::ostream &out, const Vec3 &p, const Quat &q)
     out << "double3 xformOp:translate = "; vector(out, p);
     out << "\nquatf xformOp:orient = (" << q.w << ',' << q.x << ',' << q.y << ',' << q.z << ")\n";
 }
-void collectSkin(const st::Snapshot &data, const std::string &path, Skeleton &sk, float minSkinWeight)
+struct CollisionTopology
+{
+    std::vector<size_t> owners;
+    std::vector<bool> collapsedRoots;
+};
+CollisionTopology collisionTopology(const Skeleton &sk)
+{
+    std::vector<bool> arm, hand, head;
+    for (const auto &path : sk.names)
+    {
+        const auto name=joints::boneName(path);
+        arm.push_back(name.find("arm")!=std::string::npos);
+        hand.push_back(name.find("hand")!=std::string::npos || name.find("wrist")!=std::string::npos);
+        head.push_back(name.find("head")!=std::string::npos);
+    }
+    // Prefer a named hand/wrist, even beyond an intervening helper. In that arm's
+    // subtree the arm-to-non-arm fallback must not swallow helpers or side branches.
+    auto hasHand=hand;
+    for (size_t j=sk.names.size();j-->0;)
+        if (sk.parents[j]>=0 && hasHand[j]) hasHand[sk.parents[j]]=true;
+    CollisionTopology topology;
+    for (size_t j=0;j<sk.names.size();++j)
+    {
+        const int p=sk.parents[j];
+        const bool inherited=p>=0 && topology.collapsedRoots[topology.owners[p]];
+        const bool fallback=p>=0 && arm[p] && !arm[j] && !hasHand[p];
+        topology.owners.push_back(inherited ? topology.owners[p] : j);
+        topology.collapsedRoots.push_back(!inherited && (hand[j] || head[j] || fallback));
+    }
+    return topology;
+}
+void collectSkin(const st::Snapshot &data, const std::string &path, Skeleton &sk,
+                 const std::vector<size_t> &owners, float minSkinWeight,
+                 const std::vector<Matrix> &rest, std::vector<Vec3> &restSkin)
 {
     const auto &prim = data.at(path);
     const auto &iv = inherited(data,path,"primvars:skel:jointIndices").numbers;
@@ -72,13 +106,15 @@ void collectSkin(const st::Snapshot &data, const std::string &path, Skeleton &sk
     }
     const auto &geom = inherited(data,path,"primvars:skel:geomBindTransform").numbers;
     const Matrix geomBind = geom.empty() ? Matrix(Identity) : matrix(geom);
-    std::vector<Matrix> skinning;
-    for (size_t i=0; i<sk.names.size(); ++i)
+    std::vector<Matrix> skinning,restSkinning;
+    for (size_t i=0; i<sk.names.size(); ++i) {
         skinning.push_back(sk.toCharacter * sk.jointPose[i] * sk.inverseBind[i] * geomBind);
+        restSkinning.push_back(rest[i]*sk.inverseBind[i]*geomBind);
+    }
     for (size_t v=0; v<points.size()/3; ++v)
     {
         Vec3 p{float(points[3*v]),float(points[3*v+1]),float(points[3*v+2])};
-        Vec3 posed(Zero);
+        Vec3 posed(Zero),restPoint(Zero);
         require(std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z), "Non-finite skin vertex.");
         std::set<size_t> bones;
         double total=0;
@@ -92,12 +128,16 @@ void collectSkin(const st::Snapshot &data, const std::string &path, Skeleton &sk
             require(index<remap.size(), "Joint index out of range.");
             const size_t joint=remap[index];
             posed += skinning[joint].transform(p)*float(w);
+            restPoint += restSkinning[joint].transform(p)*float(w);
             total += w;
             // Evaluate the complete skinned position, but filter hull membership only.
-            if (w > minSkinWeight) bones.insert(joint);
+            // Deduplicate after mapping: a vertex shared by several fingers is
+            // included only once in the hand hull. Keep the per-influence threshold.
+            if (w > minSkinWeight) bones.insert(owners[joint]);
         }
         if (total==0) continue;
         require(std::abs(total-1)<0.002, "Skin weights must sum to one: " + path);
+        restSkin.push_back(restPoint);
         for (size_t joint : bones) sk.points[joint].push_back(posed);
     }
 }
@@ -137,6 +177,7 @@ struct Module::Impl
     st::Query poseQuery;
     std::vector<std::string> joints;
     std::map<std::string,std::vector<int>> parents;
+    std::map<std::string,CollisionTopology> collisionTopologies;
     Mode mode=Mode::Follow;
     std::map<std::string,const Pose*> poseLookup(const std::vector<Pose> &poses) const
     {
@@ -173,10 +214,13 @@ InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, f
     impl->bodies.clear();
     impl->joints.clear();
     impl->parents.clear();
+    impl->collisionTopologies.clear();
     impl->mode=Mode::Follow;
     const auto data=st::read(scene,ordinal,attributes);
     InitResult result;
     std::map<std::string,std::vector<Skeleton>> characters;
+    std::map<std::string,std::vector<Matrix>> restPoses;
+    std::map<std::string,std::vector<Vec3>> restSkins;
     for (const auto &[path,prim] : data)
     {
         if (get(prim,"usd-prim-type").token!="Skeleton") continue;
@@ -202,11 +246,14 @@ InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, f
             ++result.skeletons;
             impl->characters.push_back({sk.path, sk.character, sk.names});
             impl->parents.emplace(sk.path,sk.parents);
+            const auto &topology=impl->collisionTopologies.emplace(sk.path,collisionTopology(sk)).first->second;
+            const auto &rest=restPoses.emplace(sk.path,joints::restPose(sk)).first->second;
             for (const auto &[path,prim] : data)
             {
                 if (get(prim,"usd-prim-type").token!="Mesh" || path.rfind(root+"/",0)!=0) continue;
                 const auto &binding=inherited(data,path,"skel:skeleton").paths;
-                if (binding.size()==1 && binding[0]==sk.path) collectSkin(data,path,sk,minSkinWeight);
+                if (binding.size()==1 && binding[0]==sk.path)
+                    collectSkin(data,path,sk,topology.owners,minSkinWeight,rest,restSkins[sk.path]);
             }
         }
         std::string name="__FbikBoneColliders";
@@ -228,13 +275,19 @@ InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, f
         for (size_t si=0; si<skeletons.size(); ++si)
         {
             auto &sk=skeletons[si];
+            const auto &topology=impl->collisionTopologies.at(sk.path);
+            const auto &rest=restPoses.at(sk.path);
+            const auto characterFrame=joints::characterFrame(sk,rest,restSkins[sk.path],rootWorld);
             const std::string skeletonRoot=root+"/"+name+"/Skeleton_"+std::to_string(si);
             std::map<size_t,size_t> bodyIndices;
             std::map<size_t,Matrix> bodyPoses;
             usd << "def Scope \"Skeleton_" << si << "\"\n{\n";
             for (size_t j=0; j<sk.names.size(); ++j)
             {
-                if (sk.children[j].empty()) { ++result.leaves; continue; }
+                if (topology.owners[j]!=j) { ++result.collapsedBones; continue; }
+                // A named terminal hand/head can still have enough skin for a hull.
+                if (sk.children[j].empty() && (!topology.collapsedRoots[j] || sk.points[j].empty()))
+                { ++result.leaves; continue; }
                 const bool mesh=!sk.points[j].empty();
                 ConvexShape hull;
                 Vec3 center(Zero),size(Zero); Quat rotation(Identity); float length=0, radius=0;
@@ -263,10 +316,13 @@ InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, f
                     rotation=Quat(Mat33(x,z.cross(x),z)); center=(a+b)*0.5f; radius=length*0.1f;
                     ++result.capsules;
                 }
-                usd << "def " << (mesh ? "Mesh" : "Capsule") << " \"Joint_" << j << "\" (prepend apiSchemas = [\"PhysicsCollisionAPI\", \"PhysicsRigidBodyAPI\""
+                usd << "def " << (mesh ? "Mesh" : "Capsule") << " \"Joint_" << j << "\" (prepend apiSchemas = [\"PhysicsCollisionAPI\", \"PhysicsRigidBodyAPI\", \"PhysxRigidBodyAPI\""
                     << (mesh ? ", \"PhysicsMeshCollisionAPI\", \"PhysxConvexHullCollisionAPI\"" : "") << "])\n{\n"
                     << "custom token fbik:joint = " << quote(sk.names[j]) << "\ncustom rel fbik:skeleton = <" << sk.path << ">\n"
                     << "bool physics:rigidBodyEnabled = true\nbool physics:kinematicEnabled = true\n"
+                    << "bool physxRigidBody:disableGravity = false\ncustom bool fbik:quasiStatic = false\n"
+                    // Tight internal limits need extra iterations along the connected body chain.
+                    << "int physxRigidBody:solverPositionIterationCount = 32\nint physxRigidBody:solverVelocityIterationCount = 4\n"
                     << "bool physics:collisionEnabled = true\ncolor3f[] primvars:displayColor = " << (mesh ? "[(0.15,0.65,0.95)]" : "[(0.95,0.65,0.1)]") << "\n";
                 Mat33 axes(rotation);
 
@@ -299,17 +355,44 @@ InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, f
                 const auto jointName="Attachment_"+std::to_string(j);
                 impl->joints.push_back(skeletonRoot+"/"+jointName);
                 ++result.joints;
-                usd << "def PhysicsSphericalJoint " << quote(jointName) << "\n{\n"
-                    << "rel physics:body0 = <" << impl->bodies[bodyIndices.at(size_t(p))].path << ">\n"
+                const auto setup=joints::setup(sk,rest,characterFrame,j);
+                const auto &limits=setup.limits;
+                const auto &parentBody=impl->bodies[bodyIndices.at(size_t(p))];
+                const auto &childBody=impl->bodies[index];
+                const Quat local0(inverse(rest[p]*parentBody.inBone).A*setup.parentFrame);
+                const Quat local1(inverse(rest[j]*childBody.inBone).A*setup.childFrame);
+                usd << "def " << (limits.hinge ? "PhysicsRevoluteJoint " : "PhysicsJoint ") << quote(jointName);
+                if (!limits.hinge)
+                    usd << " (prepend apiSchemas = [\"PhysicsLimitAPI:transX\",\"PhysicsLimitAPI:transY\",\"PhysicsLimitAPI:transZ\","
+                           "\"PhysicsLimitAPI:rotX\",\"PhysicsLimitAPI:rotY\",\"PhysicsLimitAPI:rotZ\"])";
+                usd << "\n{\nrel physics:body0 = <" << parentBody.path << ">\n"
                     << "rel physics:body1 = <" << impl->bodies[index].path << ">\n"
                     << "point3f physics:localPos0 = ";
                 vector(usd,inverse(bodyPoses.at(size_t(p))).transform(anchor));
                 usd << "\npoint3f physics:localPos1 = ";
                 vector(usd,inverse(bodyPoses.at(j)).transform(anchor));
-                usd << "\nquatf physics:localRot0 = (1,0,0,0)\nquatf physics:localRot1 = (1,0,0,0)\n"
+                usd << "\nquatf physics:localRot0 = (" << local0.w << ',' << local0.x << ',' << local0.y << ',' << local0.z << ")\n"
+                    << "quatf physics:localRot1 = (" << local1.w << ',' << local1.x << ',' << local1.y << ',' << local1.z << ")\n"
                     << "bool physics:jointEnabled = false\nbool physics:collisionEnabled = false\n"
-                    << "bool physics:excludeFromArticulation = true\n"
-                    << "float physics:coneAngle0Limit = -1\nfloat physics:coneAngle1Limit = -1\n}\n";
+                    << "bool physics:excludeFromArticulation = true\n";
+                if (limits.hinge) {
+                    ++result.hinges;
+                    usd << "uniform token physics:axis = \"X\"\nfloat physics:lowerLimit = " << limits.lower
+                        << "\nfloat physics:upperLimit = " << limits.upper << '\n';
+                }
+                else {
+                    for (const char *axis:{"transX","transY","transZ"})
+                        usd << "float limit:" << axis << ":physics:low = 1\nfloat limit:" << axis << ":physics:high = -1\n";
+                    usd << "float limit:rotX:physics:low = " << limits.lower
+                        << "\nfloat limit:rotX:physics:high = " << limits.upper << '\n';
+                    for (const char *axis:{"rotY","rotZ"})
+                        usd << "float limit:" << axis << ":physics:low = " << -limits.swing
+                            << "\nfloat limit:" << axis << ":physics:high = " << limits.swing << '\n';
+                    // USD's D6 swing limits form a pyramid. The physics wrapper adds
+                    // the native circular cone before normal simulation steps.
+                    usd << "custom float fbik:swingLimit = " << limits.swing << '\n';
+                }
+                usd << "}\n";
             }
             usd << "}\n";
         }
@@ -356,7 +439,7 @@ Mode Module::mode() const { return impl->mode; }
 void Module::setMode(Mode mode, ovstage_ordinal_t &ordinal)
 {
     require(impl->stage!=nullptr,"setMode requires init.");
-    require(mode==Mode::Follow || mode==Mode::Ragdoll,"Invalid character mode.");
+    require(mode==Mode::Follow || mode==Mode::Ragdoll || mode==Mode::QuasiStatic,"Invalid character mode.");
     if (mode==impl->mode) return;
     auto *s=impl->stage;
     std::vector<ovstage_query_handle_t> queries;
@@ -381,10 +464,12 @@ void Module::setMode(Mode mode, ovstage_ordinal_t &ordinal)
             ovx_string_or_token_t attribute{};attribute.string=st::str(name);
             st::wait(s,ovstage_write_attribute(s,queries[i],attribute,ordinal,data,OVSTAGE_PRIM_MODE_UPSERT));
         };
-        uint8_t kinematic=mode==Mode::Follow,enabled=mode==Mode::Ragdoll,asleep=0;
+        uint8_t kinematic=mode==Mode::Follow,enabled=mode!=Mode::Follow,quasiStatic=mode==Mode::QuasiStatic,asleep=0;
         float zero[3]={0,0,0};
         for (size_t i=0;i<impl->bodies.size();++i) {
             write(i,"physics:kinematicEnabled",&kinematic,{kDLBool,8,1});
+            write(i,"physxRigidBody:disableGravity",&quasiStatic,{kDLBool,8,1});
+            write(i,"fbik:quasiStatic",&quasiStatic,{kDLBool,8,1});
             write(i,"physics:velocity",zero,{kDLFloat,32,3});
             write(i,"physics:angularVelocity",zero,{kDLFloat,32,3});
             write(i,"physics:startsAsleep",&asleep,{kDLBool,8,1});
@@ -415,6 +500,7 @@ std::vector<Pose> Module::readPoses(const std::vector<Pose> &referencePoses,ovst
         for (const auto &body:impl->bodies)
             if (body.skeleton==pose.skeletonPath) bodies.emplace(body.joint,&body);
         const auto &parents=impl->parents.at(pose.skeletonPath);
+        const auto &owners=impl->collisionTopologies.at(pose.skeletonPath).owners;
         for (size_t j=0;j<pose.bones.size();++j)
         {
             if (const auto it=bodies.find(j);it!=bodies.end()) {
@@ -424,7 +510,9 @@ std::vector<Pose> Module::readPoses(const std::vector<Pose> &referencePoses,ovst
                 pose.bones[j]=packed(toCharacter*world(data.at(body.path))*inverse(body.inBone));
             }
             else if (parents[j]>=0) {
-                const size_t p=size_t(parents[j]);
+                // Collapsed descendants follow their hand/head while retaining
+                // all reference local angles, including across multiple levels.
+                const size_t p=owners[j]!=j ? owners[j] : size_t(parents[j]);
                 pose.bones[j]=packed(unpacked(pose.bones[p])*inverse(unpacked(reference[p]))*unpacked(reference[j]));
             }
         }

@@ -1,5 +1,7 @@
 #include "PhysicsSimulation.h"
 #include <ovphysx/experimental/OvStageOutput.hpp>
+#include <extensions/PxD6Joint.h>
+#include <PxRigidDynamic.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -150,6 +152,8 @@ struct PhysicsSimulation::Impl
     std::map<std::string, Matrix> initial;
     std::map<std::string, Matrix> childLocals;
     std::set<std::string> kinematic;
+    std::set<std::string> quasiStatic;
+    std::map<std::string,float> swingCones;
     stage::Query targetsQuery, localsQuery, transformsQuery;
     std::vector<std::string> targetPaths;
     std::vector<Matrix> targetLocals, targetWorlds, localTransforms;
@@ -158,12 +162,82 @@ struct PhysicsSimulation::Impl
     bool hasJointLayer = false, activeDrag = false, stepped = false, pendingOutput = false;
     float dragDepth = 0;
     Vec3 target{0, 0, 0};
-    void drain(ovstage_ordinal_t ordinal)
+    void realizeJoints(ovstage_ordinal_t ordinal)
+    {
+        // ovphysx requires a warmup to expose native joints. At 1 ns, existing
+        // contact/limit errors can generate enormous correction velocities. Keep
+        // the authored starting state, then restore it before the first real tick.
+        const auto state=viewer::stage::read(stage,ordinal,{"omni:fabric:worldMatrix",
+            "physics:velocity","physics:angularVelocity","physics:startsAsleep"});
+        check(ovphysx_step_sync(handle,1e-9f));
+        for (const auto &[path,local]:initial) {
+            void *pointer=nullptr;
+            check(ovphysx_get_physx_ptr(handle,{path.c_str(),path.size()},OVPHYSX_PHYSX_TYPE_ACTOR,&pointer));
+            auto *body=pointer ? static_cast<physx::PxRigidActor*>(pointer)->is<physx::PxRigidDynamic>() : nullptr;
+            if (!body) continue;
+            const auto &prim=state.at(path);
+            const auto m=matrix(prim,"omni:fabric:worldMatrix");
+            const physx::PxMat33 rotation(
+                physx::PxVec3(float(m[0]),float(m[1]),float(m[2])).getNormalized(),
+                physx::PxVec3(float(m[4]),float(m[5]),float(m[6])).getNormalized(),
+                physx::PxVec3(float(m[8]),float(m[9]),float(m[10])).getNormalized());
+            body->setGlobalPose(physx::PxTransform(physx::PxVec3(float(m[12]),float(m[13]),float(m[14])),
+                                                 physx::PxQuat(rotation).getNormalized()));
+            if (body->getRigidBodyFlags() & physx::PxRigidBodyFlag::eKINEMATIC) continue;
+            const auto velocity=[&](const char *name) {
+                const auto it=prim.find(name);
+                if (it==prim.end() || it->second.numbers.empty()) return physx::PxVec3(0);
+                const auto &v=it->second.numbers;
+                if (v.size()!=3) throw std::runtime_error("Invalid initial velocity: "+path);
+                return physx::PxVec3(float(v[0]),float(v[1]),float(v[2]));
+            };
+            body->setLinearVelocity(velocity("physics:velocity"));
+            body->setAngularVelocity(velocity("physics:angularVelocity")*(physx::PxPi/180));
+            if (flag(prim,"physics:startsAsleep")) body->putToSleep();
+        }
+        stepped=true;
+    }
+    void configureCones(ovstage_ordinal_t ordinal)
+    {
+        if (swingCones.empty()) return;
+        const auto state=viewer::stage::read(stage,ordinal,{"physics:jointEnabled"});
+        for (const auto &[path,angle]:swingCones) {
+            // ovphysx does not instantiate disabled joints in Follow mode.
+            if (!state.count(path) || !flag(state.at(path),"physics:jointEnabled")) continue;
+            if (!stepped) realizeJoints(ordinal);
+            void *pointer=nullptr;
+            check(ovphysx_get_physx_ptr(handle,{path.c_str(),path.size()},OVPHYSX_PHYSX_TYPE_JOINT,&pointer));
+            auto *joint=pointer ? static_cast<physx::PxJoint*>(pointer)->is<physx::PxD6Joint>() : nullptr;
+            if (!joint) throw std::runtime_error("Expected a D6 joint for swing cone: "+path);
+            joint->setSwingLimit(physx::PxJointLimitCone(angle,angle));
+        }
+    }
+    std::vector<physx::PxRigidDynamic*> quasiStaticBodies(ovstage_ordinal_t ordinal)
+    {
+        // Native pointers are borrowed for this tick only: population/control
+        // changes can recreate actors between ticks.
+        if (!quasiStatic.empty() && !stepped) realizeJoints(ordinal);
+        std::vector<physx::PxRigidDynamic*> bodies;
+        bodies.reserve(quasiStatic.size());
+        for (const auto &path:quasiStatic) {
+            void *pointer=nullptr;
+            check(ovphysx_get_physx_ptr(handle,{path.c_str(),path.size()},OVPHYSX_PHYSX_TYPE_ACTOR,&pointer));
+            auto *body=pointer ? static_cast<physx::PxRigidActor*>(pointer)->is<physx::PxRigidDynamic>() : nullptr;
+            if (!body || (body->getRigidBodyFlags() & physx::PxRigidBodyFlag::eKINEMATIC))
+                throw std::runtime_error("Expected a dynamic quasi static body: "+path);
+            bodies.push_back(body);
+        }
+        return bodies;
+    }
+    void drain(ovstage_ordinal_t ordinal, bool refreshCones=false)
     {
         stage::seal(stage, ordinal);
         ovstage_ordinal_range_t range{};
         range.end_ordinal = ordinal; // Single input batch; never includes physics output.
         check(ovphysx_update_from_ovstage(handle, range));
+        // Control/layer edits may recreate joints. Reacquire pointers instead of
+        // retaining native objects across population changes.
+        if (refreshCones) configureCones(ordinal);
     }
     explicit Impl(ovstage_instance_t *s) : stage(s) {}
     void destroy()
@@ -181,12 +255,20 @@ struct PhysicsSimulation::Impl
 
 PhysicsSimulation::PhysicsSimulation(ovstage_instance_t *s, ovstage_ordinal_t ordinal) : impl(std::make_unique<Impl>(s))
 {
-    const auto snapshot = stage::read(s, ordinal, {"omni:xform", "physics:rigidBodyEnabled", "physics:kinematicEnabled"});
+    const auto snapshot = stage::read(s, ordinal, {"omni:xform", "physics:rigidBodyEnabled", "physics:kinematicEnabled", "fbik:swingLimit", "fbik:quasiStatic"});
+    for (const auto &[path,prim]:snapshot) if (const auto it=prim.find("fbik:swingLimit");it!=prim.end()) {
+        const auto &values=it->second.numbers;
+        if (values.size()!=1 || !std::isfinite(values[0]) || values[0]<=0 || values[0]>=180)
+            throw std::runtime_error("Invalid swing cone: "+path);
+        impl->swingCones.emplace(path,float(values[0])*physx::PxPi/180);
+    }
     for (const auto &[path, prim] : snapshot)
         if (flag(prim, "physics:rigidBodyEnabled"))
             impl->initial.emplace(path, matrix(prim, "omni:xform"));
     for (const auto &[path, prim] : snapshot)
         if (flag(prim, "physics:kinematicEnabled")) impl->kinematic.insert(path);
+    for (const auto &[path, prim] : snapshot)
+        if (flag(prim, "fbik:quasiStatic")) impl->quasiStatic.insert(path);
     impl->jointPath = "/__FbikMouseJoint";
     const auto prims = stage::read(s, ordinal, {"usd-prim-type"});
     while (prims.count(impl->jointPath)) impl->jointPath += "_";
@@ -214,17 +296,21 @@ PhysicsSimulation::PhysicsSimulation(ovstage_instance_t *s, ovstage_ordinal_t or
     ovphysx_create_args args = OVPHYSX_CREATE_ARGS_DEFAULT;
     check(ovphysx_create_instance(&args, &impl->handle));
     check(ovphysx_attach_ovstage(impl->handle, s, ordinal));
+    impl->configureCones(ordinal);
     impl->cache = std::make_unique<ovphysx::utils::OvStageOutputCache>();
 }
 PhysicsSimulation::~PhysicsSimulation() = default;
 
 void PhysicsSimulation::applyControlChanges(ovstage_ordinal_t ordinal)
 {
-    impl->drain(ordinal);
-    const auto snapshot=stage::read(impl->stage,ordinal,{"physics:kinematicEnabled"});
+    impl->drain(ordinal,true);
+    const auto snapshot=stage::read(impl->stage,ordinal,{"physics:kinematicEnabled","fbik:quasiStatic"});
     impl->kinematic.clear();
-    for (const auto &[path,prim]:snapshot)
+    impl->quasiStatic.clear();
+    for (const auto &[path,prim]:snapshot) {
         if (flag(prim,"physics:kinematicEnabled")) impl->kinematic.insert(path);
+        if (flag(prim,"fbik:quasiStatic")) impl->quasiStatic.insert(path);
+    }
 }
 
 void PhysicsSimulation::setKinematicTargets(const std::vector<fbik::BodyTarget> &targets, ovstage_ordinal_t &ordinal)
@@ -254,7 +340,18 @@ void PhysicsSimulation::setKinematicTargets(const std::vector<fbik::BodyTarget> 
 
 void PhysicsSimulation::step(ovstage_ordinal_t &ordinal, bool publishOutput)
 {
+    const auto bodies=impl->quasiStaticBodies(ordinal);
+    const auto clearVelocities=[&] {
+        for (auto *body:bodies) {
+            body->setLinearVelocity(physx::PxVec3(0),false);
+            body->setAngularVelocity(physx::PxVec3(0),false);
+        }
+    };
+    // Let constraints and contacts correct positions during the tick, but keep
+    // neither incoming momentum nor solver-generated velocities between ticks.
+    clearVelocities();
     check(ovphysx_step_sync(impl->handle, timeStep));
+    clearVelocities();
     impl->stepped = true;
     impl->pendingOutput = true;
     if (publishOutput) publish(ordinal);
@@ -361,7 +458,7 @@ bool PhysicsSimulation::beginDrag(Vec3 origin, Vec3 direction, ovstage_ordinal_t
         populationWait(impl->stage, ovstage_population_remove_usd_reference(impl->stage, impl->jointLayer));
         impl->hasJointLayer = false;
         populationWait(impl->stage, ovstage_population_apply_usd_changes(impl->stage, ++ordinal));
-        impl->drain(ordinal);
+        impl->drain(ordinal,true);
     }
     std::ostringstream usd;
     usd.imbue(std::locale::classic());
@@ -383,7 +480,7 @@ bool PhysicsSimulation::beginDrag(Vec3 origin, Vec3 direction, ovstage_ordinal_t
         stage::str(content.c_str()), stage::str("/"), &impl->jointLayer));
     impl->hasJointLayer = true;
     populationWait(impl->stage, ovstage_population_apply_usd_changes(impl->stage, ++ordinal));
-    impl->drain(ordinal);
+    impl->drain(ordinal,true);
     impl->dragDepth = hit.distance;
     impl->target = Vec3(hit.position[0], hit.position[1], hit.position[2]);
     impl->activeDrag = true;

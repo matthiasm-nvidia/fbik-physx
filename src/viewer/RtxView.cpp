@@ -113,7 +113,7 @@ struct Scene
     AnimationPlayer animation;
     stage::Query previewTargets;
     bool previewTargetsReady = false;
-    bool skinDirty = false, ragdollDirty = false;
+    bool skinDirty = false, physicsPoseDirty = false;
     std::vector<fbik::Pose> skinPoses;
     fbik::InitResult characterStats;
     std::vector<fbik::Pose> referencePoses;
@@ -194,7 +194,7 @@ struct Scene
     {
         skinPoses = poses;
         skinDirty = true;
-        ragdollDirty = false;
+        physicsPoseDirty = false;
         if (!poses.empty() && !poses.front().bones.empty())
         {
             const auto &pose = poses.front();
@@ -213,7 +213,7 @@ struct Scene
     void updatePose()
     {
         if (physics) physics->publish(ordinal);
-        if (ragdollDirty) displayPose(characterPhysics.readPoses(referencePoses, ordinal));
+        if (physicsPoseDirty) displayPose(characterPhysics.readPoses(referencePoses, ordinal));
     }
     void updateSkin()
     {
@@ -513,7 +513,7 @@ void RtxView::load(const std::string &path, int width, int height)
              "points", "skel:skeleton", "skel:animationSource", "skel:joints", "primvars:skel:geomBindTransform",
              "primvars:skel:jointIndices", "primvars:skel:jointWeights", "primvars:skel:jointIndices:indices",
              "primvars:skel:jointWeights:indices", "primvars:skel:skinningMethod", "skel:blendShapeTargets",
-             "fbik:joint", "fbik:skeleton"}) properties.push_back(lit(name));
+             "fbik:joint", "fbik:skeleton", "fbik:swingLimit", "fbik:quasiStatic"}) properties.push_back(lit(name));
     const ovx_string_t primMetadata[] = {lit("instanceable")};
     const ovx_string_t propertyMetadata[] = {lit("interpolation"), lit("bindMaterialAs"), lit("elementSize")};
     ovstage_population_selector_t selector{};
@@ -552,8 +552,9 @@ void RtxView::load(const std::string &path, int width, int height)
     candidate->skinning.init(candidate->stage,candidate->ordinal,candidate->characterPhysics.characters());
     candidate->animation.init(candidate->stage,candidate->ordinal,candidate->characterPhysics.characters());
     const auto &stats = candidate->characterStats;
-    std::printf("FBIK: %zu characters, %zu skeletons, %zu convex meshes, %zu capsules, %zu leaves skipped, %zu degenerate segments skipped\n",
-                stats.characters, stats.skeletons, stats.convexMeshes, stats.capsules, stats.leaves, stats.degenerate);
+    std::printf("FBIK: %zu characters, %zu skeletons, %zu convex meshes, %zu capsules, %zu collapsed bones, %zu leaves skipped, %zu degenerate segments skipped\n",
+                stats.characters, stats.skeletons, stats.convexMeshes, stats.capsules, stats.collapsedBones, stats.leaves, stats.degenerate);
+    std::printf("FBIK joints: %zu hinges, %zu ball joints with angular limits\n",stats.hinges,stats.joints-stats.hinges);
     frameBounds(*candidate);
     candidate->initialCamera = readStageCamera(candidate->stage, candidate->ordinal);
     if (candidate->initialCamera)
@@ -734,7 +735,7 @@ void RtxView::render(const Camera &camera, int width, int height)
 
 void RtxView::startAnimation()
 {
-    if (!simulating() || !boneColliderCount() || animating() || characterMode()==fbik::Mode::Ragdoll) return;
+    if (!simulating() || !boneColliderCount() || animating() || characterMode()!=fbik::Mode::Follow) return;
     impl->scene->animationPlaying=true;
 }
 void RtxView::stopAnimation()
@@ -750,7 +751,7 @@ void RtxView::seekAnimation(double seconds)
 {
     if (!std::isfinite(seconds)) throw std::runtime_error("Invalid animation time.");
     if (!impl->scene) return;
-    if (characterMode()==fbik::Mode::Ragdoll) return;
+    if (characterMode()!=fbik::Mode::Follow) return;
     // Finish older ticks before authoring a scrubbed target that has not been simulated yet.
     if (impl->scene->physics) impl->scene->physics->publish(impl->scene->ordinal);
     impl->scene->sample(std::clamp(seconds, animationStart(), animationEnd()));
@@ -769,7 +770,7 @@ void RtxView::setCharacterMode(fbik::Mode mode)
     if (s.physics) s.physics->publish(s.ordinal);
     s.characterPhysics.setMode(mode,s.ordinal);
     if (s.physics) s.physics->applyControlChanges(s.ordinal);
-    if (mode==fbik::Mode::Ragdoll) {
+    if (mode!=fbik::Mode::Follow) {
         s.animationPlaying=false;
         s.displayPose(s.characterPhysics.readPoses(s.referencePoses,s.ordinal));
     }
@@ -824,7 +825,7 @@ void RtxView::stepSimulation()
         s.sample(time);
     }
     s.physics->step(s.ordinal, false);
-    if (characterMode()==fbik::Mode::Ragdoll) s.ragdollDirty = true;
+    if (characterMode()!=fbik::Mode::Follow) s.physicsPoseDirty = true;
 }
 bool RtxView::simulating() const
 {
@@ -858,7 +859,7 @@ bool RtxView::beginDrag(const Camera::Ray &ray)
     if (!picked && starting) s.physics.reset();
     // Adding the mouse-joint layer can repopulate authored (unskinned) mesh points.
     if (picked && !s.characterPhysics.characters().empty()) {
-        if (characterMode()==fbik::Mode::Ragdoll)
+        if (characterMode()!=fbik::Mode::Follow)
             s.displayPose(s.characterPhysics.readPoses(s.referencePoses,s.ordinal));
         else
             s.displayPose(s.referencePoses);

@@ -1,0 +1,165 @@
+#usda 1.0
+(defaultPrim = "World"; metersPerUnit = 1; upAxis = "Y")
+def Xform "World" {
+    def PhysicsScene "Physics" (prepend apiSchemas = ["PhysxSceneAPI"]) {
+        float physics:gravityMagnitude = 0
+        bool physxScene:enableGPUDynamics = false
+        token physxScene:broadphaseType = "MBP"
+    }
+    def Cube "Swing" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsCollisionAPI", "PhysxRigidBodyAPI"]) {
+        double size = 0.2
+        double3 xformOp:translate = (0,0,0)
+        quatf xformOp:orient = (1,0,0,0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient"]
+        float physxRigidBody:angularDamping = 10
+    }
+    def PhysicsJoint "SwingJoint" (prepend apiSchemas = [
+        "PhysicsLimitAPI:transX", "PhysicsLimitAPI:transY", "PhysicsLimitAPI:transZ",
+        "PhysicsLimitAPI:rotX", "PhysicsLimitAPI:rotY", "PhysicsLimitAPI:rotZ"]) {
+        rel physics:body1 = </World/Swing>
+        point3f physics:localPos0 = (0,0,0)
+        point3f physics:localPos1 = (0,0,0)
+        quatf physics:localRot0 = (1,0,0,0)
+        quatf physics:localRot1 = (1,0,0,0)
+        bool physics:jointEnabled = true
+        bool physics:excludeFromArticulation = true
+        float limit:transX:physics:low = 1
+        float limit:transX:physics:high = -1
+        float limit:transY:physics:low = 1
+        float limit:transY:physics:high = -1
+        float limit:transZ:physics:low = 1
+        float limit:transZ:physics:high = -1
+        float limit:rotX:physics:low = -30
+        float limit:rotX:physics:high = 30
+        float limit:rotY:physics:low = -60
+        float limit:rotY:physics:high = 60
+        float limit:rotZ:physics:low = -60
+        float limit:rotZ:physics:high = 60
+        custom float fbik:swingLimit = 60
+    }
+    def Cube "TwistPositive" (prepend references = </World/Swing>) {
+        double3 xformOp:translate = (2,0,0)
+    }
+    def PhysicsJoint "TwistPositiveJoint" (prepend references = </World/SwingJoint>) {
+        rel physics:body1 = </World/TwistPositive>
+        point3f physics:localPos0 = (2,0,0)
+    }
+    def Cube "TwistNegative" (prepend references = </World/Swing>) {
+        double3 xformOp:translate = (4,0,0)
+    }
+    def PhysicsJoint "TwistNegativeJoint" (prepend references = </World/SwingJoint>) {
+        rel physics:body1 = </World/TwistNegative>
+        point3f physics:localPos0 = (4,0,0)
+    }
+    def Cube "Shoulder" (prepend references = </World/Swing>) {
+        double3 xformOp:translate = (6,0,0)
+    }
+    def PhysicsJoint "ShoulderJoint" (prepend references = </World/SwingJoint>) {
+        rel physics:body1 = </World/Shoulder>
+        point3f physics:localPos0 = (6,0,0)
+        float limit:rotX:physics:low = -60
+        float limit:rotX:physics:high = 60
+        float limit:rotY:physics:low = -100
+        float limit:rotY:physics:high = 100
+        float limit:rotZ:physics:low = -100
+        float limit:rotZ:physics:high = 100
+        custom float fbik:swingLimit = 100
+    }
+    def Cube "KneePositive" (prepend references = </World/Swing>) {
+        double3 xformOp:translate = (8,0,0)
+    }
+    def PhysicsRevoluteJoint "KneePositiveJoint" {
+        rel physics:body1 = </World/KneePositive>
+        point3f physics:localPos0 = (8,0,0)
+        point3f physics:localPos1 = (0,0,0)
+        quatf physics:localRot0 = (1,0,0,0)
+        quatf physics:localRot1 = (1,0,0,0)
+        uniform token physics:axis = "X"
+        float physics:lowerLimit = -60
+        float physics:upperLimit = 0
+        bool physics:jointEnabled = true
+        bool physics:excludeFromArticulation = true
+    }
+    def Cube "KneeNegative" (prepend references = </World/Swing>) {
+        double3 xformOp:translate = (10,0,0)
+    }
+    def PhysicsRevoluteJoint "KneeNegativeJoint" (prepend references = </World/KneePositiveJoint>) {
+        rel physics:body1 = </World/KneeNegative>
+        point3f physics:localPos0 = (10,0,0)
+    }
+    def Cube "RightElbow" (prepend references = </World/Swing>) {
+        double3 xformOp:translate = (12,0,0)
+    }
+    def PhysicsRevoluteJoint "RightElbowJoint" (prepend references = </World/KneePositiveJoint>) {
+        rel physics:body1 = </World/RightElbow>
+        point3f physics:localPos0 = (12,0,0)
+        float physics:lowerLimit = 0
+        float physics:upperLimit = 120
+    }
+    def Cube "LeftElbow" (prepend references = </World/Swing>) {
+        double3 xformOp:translate = (14,0,0)
+    }
+    def PhysicsRevoluteJoint "LeftElbowJoint" (prepend references = </World/KneePositiveJoint>) {
+        rel physics:body1 = </World/LeftElbow>
+        point3f physics:localPos0 = (14,0,0)
+        float physics:lowerLimit = -120
+        float physics:upperLimit = 0
+    }
+    def Cube "Inside" (prepend references = </World/Swing>) {
+        double3 xformOp:translate = (16,0,0)
+    }
+    def PhysicsJoint "InsideJoint" (prepend references = </World/SwingJoint>) {
+        rel physics:body1 = </World/Inside>
+        point3f physics:localPos0 = (16,0,0)
+    }
+    def Cube "ShoulderInside" (prepend references = </World/Swing>) {
+        double3 xformOp:translate = (18,0,0)
+    }
+    def PhysicsJoint "ShoulderInsideJoint" (prepend references = </World/ShoulderJoint>) {
+        rel physics:body1 = </World/ShoulderInside>
+        point3f physics:localPos0 = (18,0,0)
+    }
+    def Cube "InternalSwing" (prepend references = </World/Swing>) {
+        double3 xformOp:translate = (20,0,0)
+    }
+    def PhysicsJoint "InternalSwingJoint" (prepend references = </World/SwingJoint>) {
+        rel physics:body1 = </World/InternalSwing>
+        point3f physics:localPos0 = (20,0,0)
+        float limit:rotX:physics:low = -5
+        float limit:rotX:physics:high = 5
+        float limit:rotY:physics:low = -5
+        float limit:rotY:physics:high = 5
+        float limit:rotZ:physics:low = -5
+        float limit:rotZ:physics:high = 5
+        custom float fbik:swingLimit = 5
+    }
+    def Cube "InternalTwist" (prepend references = </World/Swing>) {
+        double3 xformOp:translate = (22,0,0)
+    }
+    def PhysicsJoint "InternalTwistJoint" (prepend references = </World/InternalSwingJoint>) {
+        rel physics:body1 = </World/InternalTwist>
+        point3f physics:localPos0 = (22,0,0)
+    }
+    def Cube "InternalInside" (prepend references = </World/Swing>) {
+        double3 xformOp:translate = (24,0,0)
+    }
+    def PhysicsJoint "InternalInsideJoint" (prepend references = </World/InternalSwingJoint>) {
+        rel physics:body1 = </World/InternalInside>
+        point3f physics:localPos0 = (24,0,0)
+    }
+    def Cube "KneeInside" (prepend references = </World/Swing>) {
+        double3 xformOp:translate = (26,0,0)
+    }
+    def PhysicsRevoluteJoint "KneeInsideJoint" (prepend references = </World/KneePositiveJoint>) {
+        rel physics:body1 = </World/KneeInside>
+        point3f physics:localPos0 = (26,0,0)
+    }
+    # Native-joint initialization must preserve unrelated bodies' authored velocities.
+    def Cube "Moving" (prepend references = </World/Swing>) {
+        double3 xformOp:translate = (30,0,0)
+        vector3f physics:velocity = (1,2,3)
+        vector3f physics:angularVelocity = (0,90,0)
+        float physxRigidBody:linearDamping = 0
+        float physxRigidBody:angularDamping = 0
+    }
+}

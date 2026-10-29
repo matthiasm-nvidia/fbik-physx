@@ -491,10 +491,10 @@ int wmain(int argc, wchar_t **argv)
                         }
                         if (hasCharacter)
                         {
-                            int mode=rtx.characterMode()==fbik::Mode::Ragdoll ? 1 : 0;
+                            int mode=static_cast<int>(rtx.characterMode());
                             ImGui::PushItemWidth(210 * 0.7f * scale);
-                            if (ImGui::Combo("Mode", &mode, "Follow\0Ragdoll\0")) {
-                                rtx.setCharacterMode(mode ? fbik::Mode::Ragdoll : fbik::Mode::Follow);
+                            if (ImGui::Combo("Mode", &mode, "Follow\0Ragdoll\0Quasi static\0")) {
+                                rtx.setCharacterMode(static_cast<fbik::Mode>(mode));
                                 v.animationPlaying=rtx.animating();
                             }
                             ImGui::PopItemWidth();
@@ -579,6 +579,8 @@ int wmain(int argc, wchar_t **argv)
                         ImGui::Text("Connected: %zu joints", rtx.boneJointCount());
                         ImGui::TextWrapped(rtx.characterMode()==fbik::Mode::Follow
                             ? "Kinematic bone bodies follow the animation."
+                            : rtx.characterMode()==fbik::Mode::QuasiStatic
+                            ? "Gravity is off and momentum is cleared each step. Contacts and joint limits remain active."
                             : "Dynamic bone bodies drive the character. Animation is held.");
                     }
                 }

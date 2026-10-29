@@ -27,7 +27,7 @@ add_library(stage_data STATIC src/viewer/StageData.cpp)
 target_include_directories(stage_data PUBLIC src/viewer)
 target_link_libraries(stage_data PUBLIC ovstage::ovstage)
 
-add_library(fbik STATIC src/fbik/Fbik.cpp src/fbik/MeshTools/Geometry.cpp src/fbik/MeshTools/ConvexHull.cpp)
+add_library(fbik STATIC src/fbik/Fbik.cpp src/fbik/JointSetup.cpp src/fbik/MeshTools/Geometry.cpp src/fbik/MeshTools/ConvexHull.cpp)
 target_include_directories(fbik PUBLIC src/fbik)
 target_link_libraries(fbik PRIVATE stage_data PUBLIC ovstage::ovstage)
 
@@ -40,6 +40,9 @@ add_library(viewer_core STATIC
     src/viewer/RtxView.cpp
     src/viewer/RecentFiles.cpp)
 target_include_directories(viewer_core PUBLIC src/viewer)
+target_include_directories(viewer_core PRIVATE ${ovphysx_PHYSX_INCLUDE_DIR})
+# Native joint interop must use the shipped PhysX release ABI in both configurations.
+set_source_files_properties(src/viewer/PhysicsSimulation.cpp PROPERTIES COMPILE_DEFINITIONS NDEBUG)
 target_link_libraries(viewer_core PUBLIC fbik stage_data ovstage::ovstage ovphysx::ovphysx ovrtx::ovrtx_static glfw OpenGL::GL)
 
 add_library(viewer_ui STATIC

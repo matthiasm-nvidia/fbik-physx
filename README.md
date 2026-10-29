@@ -88,8 +88,8 @@ write per physics tick. Skeleton topology, rest poses, animation mappings, and m
 bindings are cached when a scene loads. Intermediate catch-up ticks stay in PhysX;
 body output, ragdoll reconstruction, and skinning are published once for the displayed
 frame (or when picking, scrubbing, or switching modes needs the latest poses).
-The OpenGL display texture is reused until the viewport size changes. All 61 SOMA
-bodies and the 1/60-second simulation timestep are retained.
+The OpenGL display texture is reused until the viewport size changes. SOMA uses 23
+bodies after collapsing hand and head descendants, with a 1/60-second simulation timestep.
 
 ## Walking collision test
 
@@ -124,35 +124,100 @@ kinematic targets before its 1/60-second step. Physics output is never drained b
 as control input. This path uses the sample's CPU physics configuration (DirectGPU
 must be disabled).
 
-## Follow and ragdoll modes
+## Character modes
 
 The **Mode** selector in **Scene** applies to all characters. **Follow** keeps bodies
 kinematic and driven by animation. **Ragdoll** releases the current pose as dynamic
-bodies with zero initial velocities and holds animation/root motion. Physics updates
+bodies with zero initial velocities and holds animation/root motion. **Quasi static** also
+keeps bodies dynamic, but disables their gravity and clears linear and angular velocities
+before and after each fixed simulation step. Contacts, joint limits, and dragging can still
+correct positions; bodies retain no momentum between steps. Scene props keep their normal
+physics. This is a quasi static approximation, not an equilibrium solver. Physics updates
 the skeleton and visible skin after every step. Select a mode while paused or playing;
 selecting a mode alone does not start simulation. Returning to Follow snaps to the held
 animation pose. **Reset** restores the initial scene and time while retaining the mode.
 
-Spherical joints connect each body to its nearest ancestor with a body, anchored at
-the child bone's skeleton base. All rotations are free, with no drives or angular
-limits. Root bodies are unanchored. SOMA has 61 bodies and 60 joints. Joints are disabled
-in Follow and enabled in Ragdoll. A collision group disables collisions among all
+Limited joints connect each body to its nearest ancestor with a body, anchored at
+the child bone's skeleton base. Knees and elbows use revolute hinges; other connections
+use D6 ball joints with locked translation, limited twist, and circular swing cones.
+Root bodies are unanchored. SOMA has 23 bodies and 22 joints: four hinges and 18 ball
+joints. Joints are disabled in Follow and enabled in Ragdoll and Quasi static. A collision group disables collisions among all
 generated bone colliders (including across characters); environment contacts remain
 active. Shift-drag works on dynamic bone bodies as well as scene objects.
 
 `fbik::Module::init(stage, ordinal, minSkinWeight)` still builds the generated layer.
 `setMode(mode, ordinal)` publishes a dedicated control ordinal that the physics wrapper
 consumes through `applyControlChanges`. `updateTargets(poses)` supplies Follow targets.
-After a ragdoll step, `readPoses(referencePoses, ordinal)` returns the existing `Pose`
+After a dynamic step, `readPoses(referencePoses, ordinal)` returns the existing `Pose`
 type for skinning. Reference poses are captured at release; bones without bodies retain
-their local relationship to their simulated ancestors. FBIK does not advance physics
-or sample animation, and simulation output is never submitted as control input.
+their local relationship to their simulated ancestors. Fingers, eyes, jaw, and other
+collapsed descendants keep their reference local joint angles while following the hand
+or head body. FBIK does not advance physics or sample animation, and simulation output is never submitted as control input.
+
+## Joint frames and angular limits
+
+Frames are derived once from the skeleton rest pose, independently of the initially
+sampled animation and collider OBB rotations. The head-to-feet direction selects positive
+global Y or Z as up; without those landmarks, the larger rest-skin AABB extent on Y/Z
+is the fallback. This avoids mistaking a rotated T-pose's arm span for height. Foot-to-toe directions
+(preferably ToeBase) are projected horizontally, normalized per foot, and averaged to
+resolve forward. Right is forward cross up. Without usable toes, paired left/right
+landmarks resolve forward; otherwise the shorter horizontal AABB axis is the fallback.
+This assumes an upright character; the AABB fallback also assumes height exceeds arm span on Y/Z.
+
+Knees/shins/calves/lower legs and elbows/forearms/lower arms become hinges. The cross
+product of adjacent rest-pose segments determines the hinge axis when the bend is at
+least five degrees from collinearity. Near straight, knees use character-right and
+elbows use character-up, projected perpendicular to the upper segment. The axis sign
+matches that convention. The two joint frames preserve the measured initial bend, so
+zero degrees means a straight limb. Knee limits are -60 to 0 degrees about character-right:
+negative rotation bends the shin backward, opposite foot-forward, while zero prevents
+hyperextension. Elbows use 0 to 120 on the right and -120 to 0 on the left. Axes are
+stored in body-local frames.
+
+Ball-joint twist follows the bone's longitudinal direction, with zero rotation at the
+rest pose. Head twist uses the incoming neck-to-head direction. These are initial,
+symmetric simulation presets; swing values are cone half-angles, in degrees:
+
+| Joint | Twist | Maximum swing |
+| --- | --- | --- |
+| Internal joints (default) | -5 to 5 | 5 |
+| Shoulder: parent lacks arm, child contains arm | -60 to 60 | 100 |
+| Hip: parent lacks leg, child contains leg | -30 to 30 | 60 |
+| Head: child contains head | -20 to 20 | 30 |
+
+Names are case-insensitive and use only the final component of each bone path. Hinge
+classification takes precedence. Shoulder/clavicle helpers, spine, neck, wrists and ankles
+use the tight default unless they meet an exception above. SOMA has 13 tight internal
+ball joints and five wider ones. Generated bodies request 32 position and four velocity
+solver iterations to enforce the tight limits through the connected chain.
+
+Presets and frame inference are in `src/fbik/JointSetup.cpp`. USD D6 limits provide
+translation locks and twist bounds. `PhysicsSimulation` reads the generated
+`fbik:swingLimit` attribute and applies the native PhysX circular cone as well, since
+USD's per-axis swing bounds alone form a pyramid. It reapplies cones after mode and
+population changes and reacquires native pointers. Enabled joints are realized with a
+minimal initialization step when necessary; all starting body poses and velocities
+are restored afterward to avoid startup impulses. Custom stage population must include
+`fbik:swingLimit` for this integration. Limits are active in Ragdoll and Quasi static; Follow remains
+kinematic and unconstrained. Animation drives are not implemented yet.
 
 ## Character colliders
 
 On load, `fbik::Module::init` discovers skeletons under USD `SkelRoot` prims.
-For each non-leaf joint it fits an oriented box to vertices with skin weights strictly above **0.3**
-for that joint, combining bound meshes in the initial evaluated pose.
+Hands and heads each become one body including all descendant skin. Detection is
+case-insensitive and examines only the final component of each joint path. A name
+containing `hand` or `wrist` identifies a hand, and a name containing `head` identifies
+a head. If an arm subtree has no named hand or wrist, a child without `arm` below a
+parent containing `arm` is treated as the hand. Named hands beyond helper bones take
+precedence over this fallback. The outermost detected root absorbs its whole subtree;
+descendants receive no separate bodies or physics joints.
+
+For each retained non-leaf joint it fits an oriented box to vertices with skin weights
+strictly above **0.3**, combining bound meshes in the initial evaluated pose. For a hand
+or head, qualifying influences on any descendant select vertices for that root's hull.
+Each mesh vertex is included only once per body even when several influences map to it.
+The threshold still applies to individual influences, not their sum over a subtree.
 It then refines the box using 64 support-plane cuts from the decomposer algorithm.
 The resulting polygon mesh uses `PhysicsMeshCollisionAPI` with `convexHull`
 approximation, so PhysX cooks a convex mesh body shape. A 0.5 mm support allowance
@@ -161,19 +226,20 @@ The threshold is an optional `Module::init` parameter. Full skin weights still
 determine each vertex position; the threshold only selects hull vertices.
 Without qualifying vertices it creates a capsule from the joint to the average
 position of its immediate children, with radius 10% of that distance. Zero-length
-segments are skipped. Leaf joints receive no collider; the source skeleton stays
-intact and joint names have no special meaning.
+segments are skipped. Leaf joints receive no collider, except a detected hand, wrist,
+or head with qualifying skin vertices. The complete source skeleton stays intact.
 
 Generated geometry lives under each character's `__FbikBoneColliders` Xform in
 an in-memory layer. It has kinematic rigid-body and collision APIs and becomes part of the
 shared simulation on Start simulation. Use **Show bone colliders** to inspect the shapes.
-SOMA produces 61 convex meshes and omits 16 leaf joints. Reinitializing replaces the
+SOMA produces 23 convex meshes, absorbs 52 hand/head descendants, and omits two
+remaining leaf joints. Reinitializing replaces the
 module's generated layer. Source USD files are never changed.
 
 This first version supports classic linear skinning, including joint remapping
 and constant/indexed weight primvars. Blend shapes and dual-quaternion skinning
 are not supported yet. Shapes retain their fitted geometry; in Follow mode they follow animation rigidly.
-Animation drives, angular limits, and collision-driven animation tracking follow later.
+Animation drives and collision-driven animation tracking follow later.
 
 ## Verification
 
@@ -195,8 +261,11 @@ The CPU physics test verifies gravity, ground contact, child transforms, exact
 reset, repeatable trajectories, ray picking, dragging, collision resistance, and release. The small
 cube under `tests/data` is a test fixture, not a startup demo. The FBIK test covers
 multiple characters and skeletons, skin bindings, fallback capsules, leaf omission,
+hand/head subtree aggregation, helper-aware name detection, preserved descendant angles,
+Y/Z-up character frames, bent and straight hinge calibration, signed limits, circular
+swing versus pyramidal bounds, actual ragdoll angular limits, and reset repeatability,
 repeat initialization, character transforms, kinematic target tracking, skin deformation,
-physical cube displacement, repeatable animation/reset, ragdoll mode transitions, joint attachment,
+physical cube displacement, repeatable animation/reset, ragdoll/quasi static transitions, gravity and momentum clearing, dragging, joint attachment,
 collision filtering, omitted-bone reconstruction, and ragdoll skinning. The RTX test also checks
 visible cube displacement during the walk.
 

@@ -1,0 +1,224 @@
+#usda 1.0
+(defaultPrim = "World"; metersPerUnit = 1; upAxis = "Y")
+def Xform "World" {
+    def SkelRoot "Character" {
+        double3 xformOp:translate = (2, 0, 1)
+        quatf xformOp:orient = (0.70710678, 0, 0.70710678, 0)
+        float3 xformOp:scale = (1.5, 1.5, 1.5)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+        def Skeleton "Rig" {
+            # Explicit hand beyond a helper, arm fallback, nested head parts, and a terminal wrist.
+            uniform token[] joints = [
+                "root",
+                "root/LeftArm",
+                "root/LeftArm/helper",
+                "root/LeftArm/helper/LeFtHaNd",
+                "root/LeftArm/helper/LeFtHaNd/Index",
+                "root/LeftArm/helper/LeFtHaNd/Index/Tip",
+                "root/LeftArm/helper/LeFtHaNd/Thumb",
+                "root/LeftArm/sideHelper",
+                "root/LeftArm/sideHelper/end",
+                "root/RightArm",
+                "root/RightArm/FOREARM",
+                "root/RightArm/FOREARM/Palm",
+                "root/RightArm/FOREARM/Palm/Finger",
+                "root/RightArm/FOREARM/Palm/Finger/End",
+                "root/Neck",
+                "root/Neck/HeAd",
+                "root/Neck/HeAd/Jaw",
+                "root/Neck/HeAd/Jaw/Tooth",
+                "root/Neck/HeAd/Eye",
+                "root/Neck/HeAd/HEAD_End",
+                "root/WriSt",
+                "root/toe",
+                "root/toe/end",
+            ]
+            uniform matrix4d[] restTransforms = [
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,3,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(-0.5,0,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(-0.25,0,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(-0.25,0,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(-0.2,0,0.1,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(-0.3,0,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(-0.2,0,-0.2,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,0.2,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,0.1,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0.5,0,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0.25,0,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0.25,0,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0.2,0,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0.3,0,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,0.5,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,0.25,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,-0.1,0.2,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,-0.1,0.1,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0.2,0.1,0.2,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,0.3,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,0,-1,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,-0.3,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,-0.2,0,1)),
+            ]
+            uniform matrix4d[] bindTransforms = [
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,3,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(-0.5,3,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(-0.75,3,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(-1,3,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(-1.2,3,0.1,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(-1.5,3,0.1,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(-1.2,3,-0.2,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(-0.5,3.2,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(-0.5,3.3000000000000003,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0.5,3,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0.75,3,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(1,3,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(1.2,3,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(1.5,3,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,3.5,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,3.75,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,3.65,0.2,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,3.55,0.30000000000000004,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0.2,3.85,0.2,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,4.05,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,3,-1,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,2.7,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,2.5,0,1)),
+            ]
+        }
+        def Mesh "Skin_3" (prepend apiSchemas = ["SkelBindingAPI"]) {
+            point3f[] points = [(-1.04,2.96,-0.04),(-1.04,2.96,0.04),(-1.04,3.04,-0.04),(-1.04,3.04,0.04),(-0.96,2.96,-0.04),(-0.96,2.96,0.04),(-0.96,3.04,-0.04),(-0.96,3.04,0.04)]
+            int[] faceVertexCounts = [3]
+            int[] faceVertexIndices = [0,1,2]
+            rel skel:skeleton = </World/Character/Rig>
+            int[] primvars:skel:jointIndices = [0] (elementSize = 1; interpolation = "constant")
+            float[] primvars:skel:jointWeights = [1] (elementSize = 1; interpolation = "constant")
+            uniform token[] skel:joints = ["root/LeftArm/helper/LeFtHaNd"]
+        }
+        def Mesh "Skin_4" (prepend apiSchemas = ["SkelBindingAPI"]) {
+            point3f[] points = [(-1.24,2.96,0.06),(-1.24,2.96,0.14),(-1.24,3.04,0.06),(-1.24,3.04,0.14),(-1.16,2.96,0.06),(-1.16,2.96,0.14),(-1.16,3.04,0.06),(-1.16,3.04,0.14)]
+            int[] faceVertexCounts = [3]
+            int[] faceVertexIndices = [0,1,2]
+            rel skel:skeleton = </World/Character/Rig>
+            int[] primvars:skel:jointIndices = [0] (elementSize = 1; interpolation = "constant")
+            float[] primvars:skel:jointWeights = [1] (elementSize = 1; interpolation = "constant")
+            uniform token[] skel:joints = ["root/LeftArm/helper/LeFtHaNd/Index"]
+        }
+        def Mesh "Skin_5" (prepend apiSchemas = ["SkelBindingAPI"]) {
+            point3f[] points = [(-1.54,2.96,0.06),(-1.54,2.96,0.14),(-1.54,3.04,0.06),(-1.54,3.04,0.14),(-1.46,2.96,0.06),(-1.46,2.96,0.14),(-1.46,3.04,0.06),(-1.46,3.04,0.14)]
+            int[] faceVertexCounts = [3]
+            int[] faceVertexIndices = [0,1,2]
+            rel skel:skeleton = </World/Character/Rig>
+            int[] primvars:skel:jointIndices = [0] (elementSize = 1; interpolation = "constant")
+            float[] primvars:skel:jointWeights = [1] (elementSize = 1; interpolation = "constant")
+            uniform token[] skel:joints = ["root/LeftArm/helper/LeFtHaNd/Index/Tip"]
+        }
+        def Mesh "Skin_6" (prepend apiSchemas = ["SkelBindingAPI"]) {
+            point3f[] points = [(-1.24,2.96,-0.24),(-1.24,2.96,-0.16),(-1.24,3.04,-0.24),(-1.24,3.04,-0.16),(-1.16,2.96,-0.24),(-1.16,2.96,-0.16),(-1.16,3.04,-0.24),(-1.16,3.04,-0.16)]
+            int[] faceVertexCounts = [3]
+            int[] faceVertexIndices = [0,1,2]
+            rel skel:skeleton = </World/Character/Rig>
+            int[] primvars:skel:jointIndices = [0] (elementSize = 1; interpolation = "constant")
+            float[] primvars:skel:jointWeights = [1] (elementSize = 1; interpolation = "constant")
+            uniform token[] skel:joints = ["root/LeftArm/helper/LeFtHaNd/Thumb"]
+        }
+        def Mesh "Skin_11" (prepend apiSchemas = ["SkelBindingAPI"]) {
+            point3f[] points = [(0.96,2.96,-0.04),(0.96,2.96,0.04),(0.96,3.04,-0.04),(0.96,3.04,0.04),(1.04,2.96,-0.04),(1.04,2.96,0.04),(1.04,3.04,-0.04),(1.04,3.04,0.04)]
+            int[] faceVertexCounts = [3]
+            int[] faceVertexIndices = [0,1,2]
+            rel skel:skeleton = </World/Character/Rig>
+            int[] primvars:skel:jointIndices = [0] (elementSize = 1; interpolation = "constant")
+            float[] primvars:skel:jointWeights = [1] (elementSize = 1; interpolation = "constant")
+            uniform token[] skel:joints = ["root/RightArm/FOREARM/Palm"]
+        }
+        def Mesh "Skin_12" (prepend apiSchemas = ["SkelBindingAPI"]) {
+            point3f[] points = [(1.16,2.96,-0.04),(1.16,2.96,0.04),(1.16,3.04,-0.04),(1.16,3.04,0.04),(1.24,2.96,-0.04),(1.24,2.96,0.04),(1.24,3.04,-0.04),(1.24,3.04,0.04)]
+            int[] faceVertexCounts = [3]
+            int[] faceVertexIndices = [0,1,2]
+            rel skel:skeleton = </World/Character/Rig>
+            int[] primvars:skel:jointIndices = [0] (elementSize = 1; interpolation = "constant")
+            float[] primvars:skel:jointWeights = [1] (elementSize = 1; interpolation = "constant")
+            uniform token[] skel:joints = ["root/RightArm/FOREARM/Palm/Finger"]
+        }
+        def Mesh "Skin_13" (prepend apiSchemas = ["SkelBindingAPI"]) {
+            point3f[] points = [(1.46,2.96,-0.04),(1.46,2.96,0.04),(1.46,3.04,-0.04),(1.46,3.04,0.04),(1.54,2.96,-0.04),(1.54,2.96,0.04),(1.54,3.04,-0.04),(1.54,3.04,0.04)]
+            int[] faceVertexCounts = [3]
+            int[] faceVertexIndices = [0,1,2]
+            rel skel:skeleton = </World/Character/Rig>
+            int[] primvars:skel:jointIndices = [0] (elementSize = 1; interpolation = "constant")
+            float[] primvars:skel:jointWeights = [1] (elementSize = 1; interpolation = "constant")
+            uniform token[] skel:joints = ["root/RightArm/FOREARM/Palm/Finger/End"]
+        }
+        def Mesh "Skin_15" (prepend apiSchemas = ["SkelBindingAPI"]) {
+            point3f[] points = [(-0.04,3.71,-0.04),(-0.04,3.71,0.04),(-0.04,3.79,-0.04),(-0.04,3.79,0.04),(0.04,3.71,-0.04),(0.04,3.71,0.04),(0.04,3.79,-0.04),(0.04,3.79,0.04)]
+            int[] faceVertexCounts = [3]
+            int[] faceVertexIndices = [0,1,2]
+            rel skel:skeleton = </World/Character/Rig>
+            int[] primvars:skel:jointIndices = [0] (elementSize = 1; interpolation = "constant")
+            float[] primvars:skel:jointWeights = [1] (elementSize = 1; interpolation = "constant")
+            uniform token[] skel:joints = ["root/Neck/HeAd"]
+        }
+        def Mesh "Skin_16" (prepend apiSchemas = ["SkelBindingAPI"]) {
+            point3f[] points = [(-0.04,3.61,0.16),(-0.04,3.61,0.24),(-0.04,3.69,0.16),(-0.04,3.69,0.24),(0.04,3.61,0.16),(0.04,3.61,0.24),(0.04,3.69,0.16),(0.04,3.69,0.24)]
+            int[] faceVertexCounts = [3]
+            int[] faceVertexIndices = [0,1,2]
+            rel skel:skeleton = </World/Character/Rig>
+            int[] primvars:skel:jointIndices = [0] (elementSize = 1; interpolation = "constant")
+            float[] primvars:skel:jointWeights = [1] (elementSize = 1; interpolation = "constant")
+            uniform token[] skel:joints = ["root/Neck/HeAd/Jaw"]
+        }
+        def Mesh "Skin_17" (prepend apiSchemas = ["SkelBindingAPI"]) {
+            point3f[] points = [(-0.04,3.51,0.26),(-0.04,3.51,0.34),(-0.04,3.59,0.26),(-0.04,3.59,0.34),(0.04,3.51,0.26),(0.04,3.51,0.34),(0.04,3.59,0.26),(0.04,3.59,0.34)]
+            int[] faceVertexCounts = [3]
+            int[] faceVertexIndices = [0,1,2]
+            rel skel:skeleton = </World/Character/Rig>
+            int[] primvars:skel:jointIndices = [0] (elementSize = 1; interpolation = "constant")
+            float[] primvars:skel:jointWeights = [1] (elementSize = 1; interpolation = "constant")
+            uniform token[] skel:joints = ["root/Neck/HeAd/Jaw/Tooth"]
+        }
+        def Mesh "Skin_18" (prepend apiSchemas = ["SkelBindingAPI"]) {
+            point3f[] points = [(0.16,3.81,0.16),(0.16,3.81,0.24),(0.16,3.89,0.16),(0.16,3.89,0.24),(0.24,3.81,0.16),(0.24,3.81,0.24),(0.24,3.89,0.16),(0.24,3.89,0.24)]
+            int[] faceVertexCounts = [3]
+            int[] faceVertexIndices = [0,1,2]
+            rel skel:skeleton = </World/Character/Rig>
+            int[] primvars:skel:jointIndices = [0] (elementSize = 1; interpolation = "constant")
+            float[] primvars:skel:jointWeights = [1] (elementSize = 1; interpolation = "constant")
+            uniform token[] skel:joints = ["root/Neck/HeAd/Eye"]
+        }
+        def Mesh "Skin_19" (prepend apiSchemas = ["SkelBindingAPI"]) {
+            point3f[] points = [(-0.04,4.01,-0.04),(-0.04,4.01,0.04),(-0.04,4.09,-0.04),(-0.04,4.09,0.04),(0.04,4.01,-0.04),(0.04,4.01,0.04),(0.04,4.09,-0.04),(0.04,4.09,0.04)]
+            int[] faceVertexCounts = [3]
+            int[] faceVertexIndices = [0,1,2]
+            rel skel:skeleton = </World/Character/Rig>
+            int[] primvars:skel:jointIndices = [0] (elementSize = 1; interpolation = "constant")
+            float[] primvars:skel:jointWeights = [1] (elementSize = 1; interpolation = "constant")
+            uniform token[] skel:joints = ["root/Neck/HeAd/HEAD_End"]
+        }
+        def Mesh "Skin_20" (prepend apiSchemas = ["SkelBindingAPI"]) {
+            point3f[] points = [(-0.04,2.96,-1.04),(-0.04,2.96,-0.96),(-0.04,3.04,-1.04),(-0.04,3.04,-0.96),(0.04,2.96,-1.04),(0.04,2.96,-0.96),(0.04,3.04,-1.04),(0.04,3.04,-0.96)]
+            int[] faceVertexCounts = [3]
+            int[] faceVertexIndices = [0,1,2]
+            rel skel:skeleton = </World/Character/Rig>
+            int[] primvars:skel:jointIndices = [0] (elementSize = 1; interpolation = "constant")
+            float[] primvars:skel:jointWeights = [1] (elementSize = 1; interpolation = "constant")
+            uniform token[] skel:joints = ["root/WriSt"]
+        }
+        # Shared descendant influences must select each vertex only once.
+        def Mesh "Shared" (prepend apiSchemas = ["SkelBindingAPI"]) {
+            point3f[] points = [(-1.3,3.1,0),(-1.25,3.15,0.02),(-1.3,3.15,-0.02)]
+            int[] faceVertexCounts = [3]
+            int[] faceVertexIndices = [0,1,2]
+            rel skel:skeleton = </World/Character/Rig>
+            int[] primvars:skel:jointIndices = [0,1] (elementSize = 2; interpolation = "constant")
+            float[] primvars:skel:jointWeights = [0.4,0.6] (elementSize = 2; interpolation = "constant")
+            uniform token[] skel:joints = ["root/LeftArm/helper/LeFtHaNd/Index/Tip","root/LeftArm/helper/LeFtHaNd/Thumb"]
+        }
+        # Summing sub-threshold influences must not introduce distant outliers.
+        def Mesh "Weak" (prepend apiSchemas = ["SkelBindingAPI"]) {
+            point3f[] points = [(100,100,100),(101,100,100),(100,101,100)]
+            int[] faceVertexCounts = [3]
+            int[] faceVertexIndices = [0,1,2]
+            rel skel:skeleton = </World/Character/Rig>
+            int[] primvars:skel:jointIndices = [3,4,5,6] (elementSize = 4; interpolation = "constant")
+            float[] primvars:skel:jointWeights = [0.25,0.25,0.25,0.25] (elementSize = 4; interpolation = "constant")
+        }
+    }
+}

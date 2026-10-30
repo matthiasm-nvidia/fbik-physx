@@ -18,7 +18,7 @@ class RtxView
 
     void initialize(const std::string &executableDirectory);
     // A failed load preserves the previously loaded scene whenever the SDK permits recovery.
-    void load(const std::string &path, int width, int height, fbik::BoneShape boneShape = fbik::BoneShape::Convex);
+    void load(const std::string &path, int width, int height);
     void render(const Camera &camera, int width, int height);
     void startAnimation();
     void stopAnimation();
@@ -43,7 +43,7 @@ class RtxView
     void endDrag();
     bool dragging() const;
     size_t boneColliderCount() const;
-    fbik::BoneShape boneShape() const;
+    const std::vector<fbik::CollisionExclusion> &collisionExclusions() const;
     size_t boneJointCount() const;
     bool boneCollidersVisible() const;
     void showBoneColliders(bool visible);

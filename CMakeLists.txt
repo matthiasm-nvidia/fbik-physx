@@ -27,7 +27,7 @@ add_library(stage_data STATIC src/viewer/StageData.cpp)
 target_include_directories(stage_data PUBLIC src/viewer)
 target_link_libraries(stage_data PUBLIC ovstage::ovstage)
 
-add_library(fbik STATIC src/fbik/Fbik.cpp src/fbik/JointSetup.cpp src/fbik/MeshTools/Geometry.cpp src/fbik/MeshTools/ConvexHull.cpp)
+add_library(fbik STATIC src/fbik/Fbik.cpp src/fbik/JointSetup.cpp src/fbik/CollisionFiltering.cpp)
 target_include_directories(fbik PUBLIC src/fbik)
 target_link_libraries(fbik PRIVATE stage_data PUBLIC ovstage::ovstage)
 

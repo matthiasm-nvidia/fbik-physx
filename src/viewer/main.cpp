@@ -33,7 +33,7 @@ struct Viewer
     viewer::RtxView *rtx = nullptr;
     bool playing = false, animationPlaying = false, loop = true, follow = false;
     float playbackSpeed = 1;
-    fbik::BoneShape boneShape = fbik::BoneShape::Convex;
+    bool showCollisionExclusions = false;
 };
 Viewer &state(GLFWwindow *window)
 {
@@ -454,22 +454,6 @@ int wmain(int argc, wchar_t **argv)
                 v.pendingLoad = demoPaths[selectedDemo];
             ImGui::PopItemWidth();
             if (rtx.loaded() && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", rtx.path().c_str());
-            const bool shapeLocked = rtx.simulating();
-            // This bundled ImGui predates BeginDisabled; a child with NoInputs locks the combo.
-            if (shapeLocked) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.5f);
-            ImGui::PushStyleColor(ImGuiCol_ChildWindowBg, ImVec4(0, 0, 0, 0));
-            ImGui::BeginChild("Bone shape control",
-                ImVec2(0, ImGui::GetTextLineHeight() + 2 * ImGui::GetStyle().FramePadding.y), false,
-                shapeLocked ? ImGuiWindowFlags_NoInputs : 0);
-            int boneShape = static_cast<int>(shapeLocked ? rtx.boneShape() : v.boneShape);
-            ImGui::PushItemWidth(-ImGui::CalcTextSize("Bone shape").x - ImGui::GetStyle().ItemInnerSpacing.x);
-            if (ImGui::Combo("Bone shape", &boneShape, "Convex\0Capsule\0") && !shapeLocked)
-                v.boneShape = static_cast<fbik::BoneShape>(boneShape);
-            ImGui::PopItemWidth();
-            ImGui::EndChild();
-            ImGui::PopStyleColor();
-            if (shapeLocked) ImGui::PopStyleVar();
-            ImGui::TextWrapped(shapeLocked ? "Pause and reset to change" : "Applies on load / reload");
             if (rtx.loaded())
             {
                 if (ImGui::Button("Reload")) v.pendingLoad = rtx.path();
@@ -594,6 +578,8 @@ int wmain(int argc, wchar_t **argv)
                         ImGui::Text("Character: %zu joints", rtx.characterJointCount());
                         ImGui::Text("Mapped: %zu bodies", rtx.boneColliderCount());
                         ImGui::Text("Connected: %zu joints", rtx.boneJointCount());
+                        ImGui::Text("Excluded: %zu pairs", rtx.collisionExclusions().size());
+                        if (ImGui::Button("Inspect exclusions")) v.showCollisionExclusions = true;
                         ImGui::TextWrapped(rtx.characterMode()==fbik::Mode::Follow
                             ? "Kinematic bone bodies follow the animation."
                             : rtx.characterMode()==fbik::Mode::QuasiStatic
@@ -631,6 +617,33 @@ int wmain(int argc, wchar_t **argv)
                 ImGui::EndPopup();
             }
             ImGui::End();
+            if (v.showCollisionExclusions)
+            {
+                ImGui::SetNextWindowSize(ImVec2(ui(650), ui(420)), ImGuiCond_FirstUseEver);
+                if (ImGui::Begin("Bone collision exclusions", &v.showCollisionExclusions)) {
+                    ImGui::TextWrapped("Pairs excluded at scene load. All other bone pairs can collide when dynamic.");
+                    ImGui::Separator();
+                    ImGui::Columns(3, "Excluded pairs");
+                    ImGui::TextUnformatted("Bone A");ImGui::NextColumn();
+                    ImGui::TextUnformatted("Bone B");ImGui::NextColumn();
+                    ImGui::TextUnformatted("Reason");ImGui::NextColumn();
+                    ImGui::Separator();
+                    for (const auto &pair : rtx.collisionExclusions()) {
+                        const auto label=[](const std::string &name) { return name.substr(name.find_last_of('/') + 1); };
+                        ImGui::TextUnformatted(label(pair.bone0).c_str());
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s\n%s",pair.bone0.c_str(),pair.body0.c_str());
+                        ImGui::NextColumn();
+                        ImGui::TextUnformatted(label(pair.bone1).c_str());
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s\n%s",pair.bone1.c_str(),pair.body1.c_str());
+                        ImGui::NextColumn();
+                        ImGui::TextUnformatted(pair.reason==fbik::ExclusionReason::Connected ? "Connected" : "Rest overlap");
+                        ImGui::NextColumn();
+                    }
+                    ImGui::Columns(1);
+                    if (rtx.collisionExclusions().empty()) ImGui::TextUnformatted("No excluded pairs.");
+                }
+                ImGui::End();
+            }
             ImGui::Render();
             ImGui_ImplGLFW_RenderDrawData(ImGui::GetDrawData());
             if (frameLimit && v.pendingLoad.empty() && ++frames >= frameLimit)
@@ -677,7 +690,7 @@ int wmain(int argc, wchar_t **argv)
                         throw std::runtime_error("USD file does not exist: " + requested);
                     stopRecording();
                     rtx.initialize(executableDirectory.u8string());
-                    rtx.load(requested, width, height, v.boneShape);
+                    rtx.load(requested, width, height);
                     renderFailed = false;
                     v.playing = false;
                     v.animationPlaying = false;

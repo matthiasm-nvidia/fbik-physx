@@ -29,12 +29,8 @@ panel layout. Recording launches FFmpeg from PATH and does not bundle its SDK.
 
 `src/fbik/MeshTools/Vec.h` is copied from `include/MeshTools/Vec.h` in
 `D:\GIT\mesh-tools-lib`, revision `49bb32a395fc2040d71126e2db755cca295f2cc6`.
-`Geometry.cpp` contains the point-cloud PCA OBB path extracted from
-`source/lib/MeshTools/Geometry.cpp`; `HeaderMath.h` contains its Jacobi/eigenvector
-helpers from `source/lib/MeshTools/utils/HeaderMath.h`. Surface fitting, convex
-optimization, and other unrelated geometry functions are excluded; temporary
-storage uses `std::vector`. The original NVIDIA source notices are retained.
-These files are bundled here and require no external source checkout.
+The original NVIDIA source notice is retained. This header is bundled here and
+requires no external source checkout.
 
 The viewer-side skinning implementation follows the linear-skinning and ovstage
 mesh-write approach inspected in the original FBIK `src/animation/Skeleton.cpp`
@@ -42,13 +38,3 @@ and `src/io/usd/UsdAnimation.cpp`. It uses this project's pose/primvar helpers a
 supports only the existing classic-linear character path. No solver was imported.
 `resources/scenes/soma_walk.usda` is generated locally by
 `tools/create_test_walk.py`; it contains no downloaded animation.
-
-## Convex bone colliders
-
-`src/fbik/MeshTools/ConvexHull.{h,cpp}` adapts the convex polyhedron representation,
-Fibonacci support directions, and `splitBelow` clipping implementation from
-`D:\GIT\decomposer/include/decomposer/ConvexShape.h` and `src/ConvexShape.cpp`
-(revision `b525be958c6c11f8c0f0fcfa330ca265f1ad37ed`). It uses the already bundled
-MeshTools vector types and OBB fitter. The adapted entry point refines an existing
-OBB in its local frame using 64 support planes and a small thickness allowance.
-No decomposition pipeline or external source dependency is added.

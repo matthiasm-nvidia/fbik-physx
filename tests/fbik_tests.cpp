@@ -1,8 +1,10 @@
 #include "Fbik.h"
-#include "MeshTools/ConvexHull.h"
 #include "JointSetup.h"
+#include "CollisionFiltering.h"
 #include <PxShape.h>
+#include <PxRigidDynamic.h>
 #include <geometry/PxCapsuleGeometry.h>
+#include <extensions/PxD6Joint.h>
 #include <map>
 #include "AnimationPlayer.h"
 #include "Skinning.h"
@@ -23,39 +25,44 @@ void check(ovphysx_result_t r)
 {
     if (r.status!=OVPHYSX_API_SUCCESS) { const auto e=ovphysx_get_last_error();throw std::runtime_error(std::string(e.ptr,e.length)); }
 }
-void checkHull(const MeshTools::ConvexShape &hull,const std::vector<MeshTools::Vec3> &points)
-{
-    require(hull.volume()>0 && hull.vertices.size()<=255,"Invalid convex hull volume or vertex count");
-    std::map<std::pair<unsigned,unsigned>,int> edges;
-    for(size_t f=0;f<hull.face_sizes.size();++f) {
-        const auto start=hull.face_starts[f],count=hull.face_sizes[f];
-        require(count>=3 && start+count<=hull.indices.size(),"Invalid hull face");
-        const auto a=hull.vertices.at(hull.indices[start]);
-        MeshTools::Vec3 normal(MeshTools::Zero);
-        for(size_t j=1;j+1<count;++j)
-            normal+=(hull.vertices.at(hull.indices[start+j])-a).cross(hull.vertices.at(hull.indices[start+j+1])-a);
-        normal.normalize();
-        for(const auto &p:points) {
-            if(normal.dot(p-a)>=.002) std::cerr << "Hull containment: points=" << points.size() << " face=" << f << " distance=" << normal.dot(p-a) << "\n";
-            require(normal.dot(p-a)<.002,"Hull cut away a source point");
-        }
-        for(size_t j=0;j<count;++j) {
-            const auto u=hull.indices[start+j],v=hull.indices[start+(j+1)%count];
-            ++edges[{u,v}];
-        }
-    }
-    for(const auto &[edge,count]:edges) require(count==1 && edges[{edge.second,edge.first}]==1,"Hull is not closed");
-}
-void testHullRefinement()
+void testCapsuleOverlap()
 {
     using namespace MeshTools;
-    const std::vector<Vec3> points={{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
-    ConvexShape hull;refineConvexHull(points,Vec3(1,1,1),.0005f,hull);
-    checkHull(hull,points);
-    require(hull.volume()<4 && hull.numFaces()>6,"Support planes did not refine the OBB");
-    for(const auto &flat:std::vector<std::vector<Vec3>>{{{0,0,0}},{{-1,0,0},{1,0,0}},{{-1,-1,0},{1,-1,0},{0,1,0}}}) {
-        refineConvexHull(flat,Vec3(1,1,.0005f),.0005f,hull);checkHull(hull,flat);
+    using namespace fbik::collision;
+    const Capsule horizontal={{-2,0,0},{2,0,0},.1f};
+    struct Case { Capsule other; bool overlap; };
+    const std::vector<Case> cases={
+        {{{-1,.2f,0},{3,.2f,0},.1f},true}, // Parallel, touching along the sides.
+        {{{3,.21f,0},{-1,.21f,0},.1f},false}, // Reversed endpoints, separated sides.
+        {{{2.2f,0,0},{4,0,0},.1f},true}, // Collinear end caps touch.
+        {{{2.21f,0,0},{4,0,0},.1f},false},
+        {{{0,-1,.19f},{0,1,.19f},.1f},true}, // Closest points inside both segments.
+        {{{0,-1,.21f},{0,1,.21f},.1f},false},
+        {{{2.1f,.1f,0},{3,1,0},.1f},true}, // Closest points at both endpoints.
+        {{{2.2f,.2f,0},{3,1,0},.1f},false},
+        {{{0,.15f,0},{0,.15f,0},.1f},true}, // Capsule versus sphere.
+        {{{2.3f,0,0},{2.3f,0,0},.1f},false},
+        {{{-2,.21f,0},{2,.210001f,0},.1f},false}}; // Nearly parallel.
+    const AffineTransform transform(Mat33(Quat(.73f,Vec3(1,2,3).normalized()))*3,Vec3(4,5,6));
+    const auto moved=[&](const Capsule &c) {
+        return Capsule{transform.transform(c.p0),transform.transform(c.p1),3*c.radius};
+    };
+    for (const auto &c:cases) {
+        require(overlaps(horizontal,c.other)==c.overlap && overlaps(c.other,horizontal)==c.overlap,
+                "Capsule segment overlap or symmetry is incorrect");
+        require(overlaps(moved(horizontal),moved(c.other))==c.overlap,
+                "Capsule overlap changed under common rotation, translation and scale");
     }
+    const Capsule sphere={{0,0,0},{0,0,0},.5f};
+    require(overlaps(sphere,{{1,0,0},{1,0,0},.5f}),"Touching spheres should overlap");
+    require(!overlaps(sphere,{{.8f,.8f,0},{.8f,.8f,0},.5f}),"Sphere test used overlapping bounds");
+    const auto capsule=restCapsule(transform,4,.1f);
+    require((capsule.p0-moved(horizontal).p0).magnitude()<1e-5 &&
+            (capsule.p1-moved(horizontal).p1).magnitude()<1e-5 && std::abs(capsule.radius-.3f)<1e-6,
+            "Rest-pose capsule lost orientation, translation or scale");
+    const AffineTransform tiny(Mat33(Identity)*.0001f,Vec3(Zero));
+    const auto a=restCapsule(tiny,4,.1f),b=restCapsule(tiny*AffineTransform(Mat33(Identity),Vec3(0,.21f,0)),4,.1f);
+    require(!overlaps(a,b),"Small separated capsules were filtered");
 }
 void testJointFrames()
 {
@@ -174,8 +181,8 @@ void testCapsules(const std::filesystem::path &root)
     using namespace MeshTools;
     Scene scene;scene.load(root/"tests/data/capsules.usda");
     fbik::Module module;
-    const auto stats=module.init(scene.stage,scene.ordinal,0.3f,fbik::BoneShape::Capsule);
-    require(stats.capsules==3 && stats.convexMeshes==0 && stats.joints==1,"Capsule selection changed body topology");
+    const auto stats=module.init(scene.stage,scene.ordinal);
+    require(stats.capsules==3 && stats.joints==1,"Capsule body topology is incorrect");
     const auto state=st::read(scene.stage,scene.ordinal,{"usd-prim-type","axis","radius","height","extent","omni:fabric:worldMatrix"});
     const std::string bone="/World/Character/__FbikBoneColliders/Skeleton_0/Joint_0";
     const std::string head="/World/Character/__FbikBoneColliders/Skeleton_0/Joint_1";
@@ -214,12 +221,152 @@ void testCapsules(const std::filesystem::path &root)
                     "PhysX capsule dimensions lost scaling or used full length as halfHeight");
         }
     }
-    const auto convex=module.init(scene.stage,scene.ordinal);
-    require(convex.convexMeshes==3 && convex.capsules==0,"Default initialization did not restore convexes");
-    const auto repeat=module.init(scene.stage,scene.ordinal,0.3f,fbik::BoneShape::Capsule);
-    require(repeat.capsules==stats.capsules && repeat.joints==stats.joints && repeat.convexMeshes==0,
-            "Changing shapes on reinitialization retained old colliders");
+    const auto repeat=module.init(scene.stage,scene.ordinal);
+    require(repeat.capsules==stats.capsules && repeat.joints==stats.joints,
+            "Reinitialization changed capsule topology");
     std::cout << "Capsule fitting, bounds, terminal/sparse spheres, native PhysX shapes and reinitialization passed.\n";
+}
+void testSelfCollision(const std::filesystem::path &root)
+{
+    namespace sk=viewer::skeleton;
+    Scene scene;scene.load(root/"tests/data/self_collision.usda");
+    fbik::Module module;
+    module.init(scene.stage,scene.ordinal);
+    const std::string base="/World/Character/__FbikBoneColliders/Skeleton_0/Joint_";
+    const std::string a=base+"0",b=base+"1",c=base+"2",d=base+"3",e=base+"4";
+    const std::string other="/World/Other/__FbikBoneColliders/Skeleton_0/Joint_0";
+    const auto excluded=[&](const std::string &p,const std::string &q) {
+        for (const auto &pair:module.collisionExclusions())
+            if ((pair.body0==p && pair.body1==q) || (pair.body0==q && pair.body1==p)) return true;
+        return false;
+    };
+    require(excluded(a,b),"Rest capsule overlap was not filtered");
+    require(!excluded(a,c),"Initial animation overlap was incorrectly made permanent");
+    require(!excluded(a,e),"Disjoint capsules with overlapping bounds were filtered");
+    require(!excluded(a,d),"Separated capsules were filtered");
+    require(!excluded(a,other),"Different characters were filtered");
+    const auto stats=module.init(scene.stage,scene.ordinal);
+    require(excluded(a,b) && !excluded(a,d) && !excluded(a,e) && !excluded(a,c) && !excluded(a,other),"Reinitialization changed capsule filtering");
+    require(stats.connectedExclusions==0 && stats.overlapExclusions==module.collisionExclusions().size(),
+            "Collision exclusion report has incorrect counts/reasons");
+    const auto state=st::read(scene.stage,scene.ordinal,{"usd-prim-type","physics:filteredPairs"});
+    size_t pairCount=0;
+    for (const auto &[path,prim]:state) {
+        require(sk::get(prim,"usd-prim-type").token!="PhysicsCollisionGroup","Blanket bone collision group remains");
+        for (const auto &target:sk::get(prim,"physics:filteredPairs").paths) {
+            require(excluded(path,target),"Authored pair filter differs from the report");++pairCount;
+        }
+    }
+    require(pairCount==module.collisionExclusions().size(),"Pair filters missing or duplicated in USD");
+    Physics physics;ovphysx_create_args args=OVPHYSX_CREATE_ARGS_DEFAULT;
+    check(ovphysx_create_instance(&args,&physics.handle));check(ovphysx_attach_ovstage(physics.handle,scene.stage,scene.ordinal));
+    check(ovphysx_step_sync(physics.handle,1.f/60));
+    std::map<std::string,physx::PxRigidDynamic*> bodies;
+    for (const auto &path:{a,b,c,d,e,other}) {
+        void *actor=nullptr;check(ovphysx_get_physx_ptr(physics.handle,{path.c_str(),path.size()},OVPHYSX_PHYSX_TYPE_ACTOR,&actor));
+        auto *body=actor ? static_cast<physx::PxRigidActor*>(actor)->is<physx::PxRigidDynamic>() : nullptr;
+        require(body!=nullptr,"Missing bone actor for collision test");bodies[path]=body;
+    }
+    const auto separation=[&](const std::string &partner) {
+        int index=0;
+        for (const auto &[path,body]:bodies) {
+            body->setRigidBodyFlag(physx::PxRigidBodyFlag::eKINEMATIC,false);
+            body->setActorFlag(physx::PxActorFlag::eDISABLE_GRAVITY,true);
+            body->setLinearVelocity({0,0,0});body->setAngularVelocity({0,0,0});
+            auto pose=body->getGlobalPose();
+            pose.p=physx::PxVec3(100+10.f*index++,0,0);body->setGlobalPose(pose);
+        }
+        auto pose0=bodies.at(a)->getGlobalPose(),pose1=bodies.at(partner)->getGlobalPose();
+        pose0.p={0,0,0};pose1.p={.5f,0,0};
+        bodies.at(a)->setGlobalPose(pose0);bodies.at(partner)->setGlobalPose(pose1);
+        for (int frame=0;frame<20;++frame) check(ovphysx_step_sync(physics.handle,1.f/60));
+        return (bodies.at(a)->getGlobalPose().p-bodies.at(partner)->getGlobalPose().p).magnitude();
+    };
+    require(std::abs(separation(b)-.5f)<1e-4,"Rest-excluded bodies generated collision response");
+    require(separation(d)>.95f,"Separated rest capsules did not collide");
+    require(separation(e)>.95f,"Capsules with overlapping rest bounds did not collide");
+    require(separation(c)>.95f,"Unfiltered bones in the same character did not collide");
+    require(separation(other)>.95f,"Bones in different characters did not collide");
+    std::cout << "Rest capsule filters, overlapping-bounds regression, initialization-pose independence, native self/cross-character collisions passed.\n";
+}
+void testJointDamping(const std::filesystem::path &root)
+{
+    using namespace physx;
+    std::vector<float> undamped;
+    for (const float damping:{0.f,5.f}) {
+        Scene scene;scene.load(root/"tests/data/joint_damping.usda");
+        fbik::Module module;
+        const auto stats=damping==0 ? module.init(scene.stage,scene.ordinal,.3f,0)
+                                    : module.init(scene.stage,scene.ordinal);
+        require(stats.joints==2 && stats.hinges==1,"Damping fixture lost its ball joint or hinge");
+        const auto before=scene.ordinal;
+        bool rejected=false;
+        try { module.init(scene.stage,scene.ordinal,.3f,-1); }
+        catch (const std::runtime_error &) { rejected=true; }
+        require(rejected && scene.ordinal==before,"Invalid damping changed the initialized scene");
+        module.setMode(fbik::Mode::Ragdoll,scene.ordinal);
+        Physics physics;ovphysx_create_args args=OVPHYSX_CREATE_ARGS_DEFAULT;
+        check(ovphysx_create_instance(&args,&physics.handle));check(ovphysx_attach_ovstage(physics.handle,scene.stage,scene.ordinal));
+        check(ovphysx_step_sync(physics.handle,1.f/60));
+        size_t sample=0;
+        for (const std::string name:{"Ball","Hinge"}) {
+            const auto path="/World/"+name+"/__FbikBoneColliders/Skeleton_0/Attachment_1";
+            void *pointer=nullptr;
+            check(ovphysx_get_physx_ptr(physics.handle,{path.c_str(),path.size()},OVPHYSX_PHYSX_TYPE_JOINT,&pointer));
+            auto *joint=pointer ? static_cast<PxJoint*>(pointer)->is<PxD6Joint>() : nullptr;
+            require(joint!=nullptr,"Generated damping joint was not realized");
+            PxRigidActor *actor0=nullptr,*actor1=nullptr;joint->getActors(actor0,actor1);
+            auto *parent=actor0->is<PxRigidDynamic>(),*child=actor1->is<PxRigidDynamic>();
+            require(parent && child,"Damping fixture is missing dynamic bodies");
+            const auto pose0=parent->getGlobalPose(),pose1=child->getGlobalPose();
+            const auto frame=pose0*joint->getLocalPose(PxJointActorIndex::eACTOR0);
+            const auto reset=[&] {
+                parent->setGlobalPose(pose0);child->setGlobalPose(pose1);
+                for (auto *body:{parent,child}) {
+                    body->setLinearVelocity(PxVec3(0));body->setAngularVelocity(PxVec3(0));
+                    body->setLinearDamping(0);body->setAngularDamping(0);body->setSleepThreshold(0);
+                }
+            };
+            const auto step=[&] {
+                for (int i=0;i<30;++i) check(ovphysx_step_sync(physics.handle,1.f/60));
+            };
+            const PxD6Drive::Enum drives[]={PxD6Drive::eTWIST,PxD6Drive::eSWING1,PxD6Drive::eSWING2};
+            const PxVec3 axes[]={{1,0,0},{0,1,0},{0,0,1}};
+            for (int i=0;i<(name=="Hinge" ? 1 : 3);++i) {
+                const auto drive=joint->getDrive(drives[i]);
+                require(drive.stiffness==0 && std::abs(drive.damping-damping)<1e-4 &&
+                        (drive.flags & PxD6JointDriveFlag::eACCELERATION),
+                        "Native angular damping has wrong units, drive mode or stiffness");
+                reset();
+                const auto axis=frame.q.rotate(axes[i]);
+                child->setAngularVelocity(axis);
+                child->setLinearVelocity(axis.cross(pose1.p-frame.p));
+                step();
+                const auto speed=joint->getRelativeAngularVelocity().magnitude();
+                if (damping==0) { require(speed>.5f,"Undamped fixture hit an angular limit");undamped.push_back(speed); }
+                else require(speed<undamped.at(sample)*.4f,"Joint damping did not reduce relative angular motion");
+                ++sample;
+            }
+            reset();
+            const PxQuat offset(.2f,frame.q.rotate(PxVec3(1,0,0)));
+            child->setGlobalPose(PxTransform(frame.p+offset.rotate(pose1.p-frame.p),offset*pose1.q));
+            const auto held=joint->getRelativeTransform().q;
+            step();
+            require(std::abs(held.dot(joint->getRelativeTransform().q))>1-1e-6f &&
+                    joint->getRelativeAngularVelocity().magnitude()<1e-3f,
+                    "Damping added a spring toward the rest pose");
+            if (name=="Ball") {
+                reset();
+                const auto spin=frame.q.rotate(PxVec3(.5f,0,0));
+                parent->setAngularVelocity(spin);child->setAngularVelocity(spin);
+                step();
+                require((parent->getAngularVelocity()-spin).magnitude()<1e-3f &&
+                        (child->getAngularVelocity()-spin).magnitude()<1e-3f,
+                        "Joint damping slowed common rigid rotation");
+            }
+        }
+    }
+    std::cout << "Joint damping: native gains, hinge/twist/swing decay, zero damping, free pose and common rotation passed.\n";
 }
 void testAngularLimits(const std::filesystem::path &root)
 {
@@ -269,12 +416,12 @@ void testAngularLimits(const std::filesystem::path &root)
     }
     std::cout << "Hinge limits, positive/negative twist, circular swing cones and reset passed.\n";
 }
-void testSomaJointSetup(const std::filesystem::path &root, fbik::BoneShape boneShape = fbik::BoneShape::Convex)
+void testSomaJointSetup(const std::filesystem::path &root)
 {
     namespace sk=viewer::skeleton;
     using namespace MeshTools;
     Scene scene;scene.load(root/"resources/scenes/basic_walk.usda");
-    fbik::Module module;module.init(scene.stage,scene.ordinal,0.3f,boneShape);
+    fbik::Module module;module.init(scene.stage,scene.ordinal);
     const auto &character=module.characters().front();
     const auto pose=viewer::sampleAnimation(scene.stage,scene.ordinal,0,module.characters()).front();
     const auto world=sk::unpacked(pose.characterWorld);
@@ -324,14 +471,13 @@ void testSomaJointSetup(const std::filesystem::path &root, fbik::BoneShape boneS
     require(knees==2 && internal==13 && mobile==5,"SOMA joint classification missed bones");
     std::cout << "SOMA has 13 tightly limited internal joints, five mobile ball joints and two backward-bending knees.\n";
 }
-void testDirectRagdollStart(const std::filesystem::path &root, fbik::BoneShape boneShape = fbik::BoneShape::Convex)
+void testDirectRagdollStart(const std::filesystem::path &root)
 {
     namespace sk=viewer::skeleton;
     Scene scene;scene.load(root/"resources/scenes/basic_walk.usda");
     fbik::Module module;
-    const auto stats=module.init(scene.stage,scene.ordinal,0.3f,boneShape);
-    if (boneShape==fbik::BoneShape::Capsule)
-        require(stats.capsules==23 && stats.convexMeshes==0 && stats.joints==22,"SOMA capsule topology changed");
+    const auto stats=module.init(scene.stage,scene.ordinal);
+    require(stats.capsules==23 && stats.joints==22,"SOMA capsule topology changed");
     const auto reference=viewer::sampleAnimation(scene.stage,scene.ordinal,0,module.characters());
     module.setMode(fbik::Mode::Ragdoll,scene.ordinal);
     std::vector<fbik::Pose> previous;
@@ -451,6 +597,9 @@ void testRagdoll(const std::filesystem::path &root)
     Scene scene;scene.load(root/"tests/data/ragdoll.usda");
     fbik::Module module;const auto stats=module.init(scene.stage,scene.ordinal);
     require(stats.capsules==4 && stats.joints==2 && stats.degenerate==2,"Ragdoll topology mismatch");
+    require(stats.connectedExclusions==2,"Connected filtering did not bridge omitted parent bodies");
+    for (const auto &pair:module.collisionExclusions())
+        require(pair.reason==fbik::ExclusionReason::Connected,"Separated characters acquired overlap exclusions");
     const auto reference=viewer::sampleAnimation(scene.stage,scene.ordinal,0,module.characters());
     viewer::AnimationPlayer animation;
     animation.init(scene.stage,scene.ordinal,module.characters());
@@ -526,7 +675,7 @@ void testRagdoll(const std::filesystem::path &root)
                 require(poses[0].bones[0][13]<reference[0].bones[0][13]-.1,"Ragdoll did not fall under gravity");
                 for(size_t j=0;j<poses[0].bones.size();++j) for(int k=0;k<16;++k)
                     require(std::abs(poses[0].bones[j][k]-poses[1].bones[j][k])<.001,
-                            "Overlapping bone colliders pushed each other apart");
+                            "Separated characters have different local trajectories");
             }
         }
         const auto poses=module.readPoses(reference,scene.ordinal);
@@ -566,12 +715,12 @@ void testCollapsedBones(const std::filesystem::path &root)
     using namespace MeshTools;
     Scene scene;scene.load(root/"tests/data/collapsed.usda");
     fbik::Module module;const auto stats=module.init(scene.stage,scene.ordinal);
-    require(stats.convexMeshes==4 && stats.capsules==8 && stats.joints==11 &&
+    require(stats.capsules==12 && stats.joints==11 &&
             stats.collapsedBones==9 && stats.leaves==2 && stats.degenerate==0,"Collapsed topology mismatch");
     const std::string base="/World/Character/__FbikBoneColliders/Skeleton_0/";
     const auto bodyPath=[&](size_t j) { return base+"Joint_"+std::to_string(j); };
     const auto data=st::read(scene.stage,scene.ordinal,{"usd-prim-type","omni:fabric:worldMatrix","joints",
-        "restTransforms","bindTransforms","points","faceVertexCounts","faceVertexIndices","physics:body0","physics:body1"});
+        "restTransforms","bindTransforms","points","radius","height","physics:body0","physics:body1"});
     const auto skeleton=sk::readSkeleton(data,"/World/Character/Rig","/World/Character");
     const std::map<size_t,size_t> collapsed={{4,3},{5,3},{6,3},{12,11},{13,11},{16,15},{17,15},{18,15},{19,15}};
     for (const auto &[j,owner]:collapsed) {
@@ -581,24 +730,14 @@ void testCollapsedBones(const std::filesystem::path &root)
     for (size_t j:{1,2,7,9,10,14,21})
         require(data.at(bodyPath(j)).at("usd-prim-type").token=="Capsule","Helper, arm or unrelated bone was collapsed");
     for (size_t j:{3,11,15,20})
-        require(data.at(bodyPath(j)).at("usd-prim-type").token=="Mesh","Hand/head/wrist hull missing");
+        require(data.at(bodyPath(j)).at("usd-prim-type").token=="Capsule","Hand/head/wrist capsule missing");
     require(data.at(base+"Attachment_3").at("physics:body0").paths[0]==bodyPath(2),"Named hand lost its helper parent");
     require(data.at(base+"Attachment_11").at("physics:body0").paths[0]==bodyPath(10),"Fallback hand lost its forearm parent");
 
-    // Check every subtree vertex against the fitted convex faces, including leaves
-    // and separate remapped meshes. Weak influences must not enlarge the hull.
+    // Check the fitted bounds against all subtree vertices, including leaves
+    // and separate remapped meshes. Weak influences must not enlarge the capsule.
     for (size_t owner:{3,11,15,20}) {
         const auto &prim=data.at(bodyPath(owner));
-        ConvexShape hull;
-        const auto &vertices=prim.at("points").numbers;
-        for(size_t v=0;v<vertices.size();v+=3)
-            hull.vertices.push_back({float(vertices[v]),float(vertices[v+1]),float(vertices[v+2])});
-        for(double count:prim.at("faceVertexCounts").numbers) {
-            hull.face_starts.push_back(hull.indices.size());
-            hull.face_sizes.push_back(unsigned(count));
-            const auto &indices=prim.at("faceVertexIndices").numbers;
-            for(size_t k=0;k<size_t(count);++k) hull.indices.push_back(unsigned(indices[hull.indices.size()]));
-        }
         const auto toBody=sk::inverse(sk::world(prim))*sk::world(data.at("/World/Character"));
         std::vector<Vec3> points;
         for(size_t j=0;j<skeleton.names.size();++j) {
@@ -612,8 +751,13 @@ void testCollapsedBones(const std::filesystem::path &root)
             for(size_t v=0;v<source.size();v+=3)
                 points.push_back(toBody.transform({float(source[v]),float(source[v+1]),float(source[v+2])}));
         }
-        checkHull(hull,points);
-        for(const auto &v:hull.vertices) require(v.magnitude()<1,"Weak descendant influences inflated the hull");
+        Bounds3 bounds(Empty);
+        for (const auto &point:points) bounds.include(point);
+        const auto spans=bounds.getDimensions();
+        require(bounds.getCenter().magnitude()<1e-4,"Descendant skin did not center the capsule");
+        require(std::abs(prim.at("radius").numbers[0]-.5f*std::min(spans.y,spans.z))<1e-4 &&
+                std::abs(prim.at("height").numbers[0]-std::max(0.f,spans.x-std::min(spans.y,spans.z)))<1e-4,
+                "Descendant skin aggregation or weak-influence rejection changed capsule dimensions");
     }
 
     auto reference=viewer::sampleAnimation(scene.stage,scene.ordinal,0,module.characters());
@@ -659,15 +803,15 @@ void testCollapsedBones(const std::filesystem::path &root)
     query.clear();
     const auto repeat=module.init(scene.stage,scene.ordinal);
     require(repeat.collapsedBones==stats.collapsedBones && repeat.joints==stats.joints &&
-            repeat.convexMeshes==stats.convexMeshes,"Reinit changed collapsed topology");
-    std::cout << "Hand/head hull aggregation, name fallback, helpers and preserved descendant angles passed.\n";
+            repeat.capsules==stats.capsules,"Reinit changed collapsed topology");
+    std::cout << "Hand/head capsule aggregation, name fallback, helpers and preserved descendant angles passed.\n";
 }
 int main(int argc,char **argv)
 {
     int code=0;bool initialized=false;
     try
     {
-        testHullRefinement();
+        testCapsuleOverlap();
         testJointFrames();
         require(argc==2,"Expected repository root");
         const auto root=std::filesystem::absolute(argv[1]);
@@ -676,11 +820,11 @@ int main(int argc,char **argv)
         ovstage_config_t config{&entry,1};st::check(ovstage_initialize(&config));initialized=true;
         viewer::PhysicsRuntime runtime;
         testCapsules(root);
+        testSelfCollision(root);
+        testJointDamping(root);
         testAngularLimits(root);
         testSomaJointSetup(root);
-        testSomaJointSetup(root,fbik::BoneShape::Capsule);
         testDirectRagdollStart(root);
-        testDirectRagdollStart(root,fbik::BoneShape::Capsule);
         testQuasiStatic(root);
         testCollapsedBones(root);
         testRagdoll(root);
@@ -689,10 +833,10 @@ int main(int argc,char **argv)
             fbik::Module module;
             auto stats=module.init(scene.stage,scene.ordinal);
             require(stats.characters==2 && stats.skeletons==3,"Multiple characters/skeletons were not discovered");
-            require(stats.convexMeshes==1 && stats.capsules==3 && stats.leaves==6 && stats.degenerate==1,"Wrong OBB/capsule/leaf counts");
+            require(stats.capsules==4 && stats.leaves==6 && stats.degenerate==1,"Wrong capsule/leaf counts");
             auto first=st::read(scene.stage,scene.ordinal,{"usd-prim-type","omni:fabric:worldMatrix","fbik:joint","height","radius","physics:kinematicEnabled"});
             const std::string a="/World/A/__FbikBoneColliders/Skeleton_0/";
-            require(first.at(a+"Joint_0").at("usd-prim-type").token=="Mesh","Skin collider was not a convex mesh");
+            require(first.at(a+"Joint_0").at("usd-prim-type").token=="Capsule","Skin collider was not a capsule");
             require(first.at(a+"Joint_1").at("usd-prim-type").token=="Capsule","Non-leaf with End in its name was skipped");
             require(!first.count(a+"Joint_2") && !first.count(a+"Joint_3") && !first.count(a+"Joint_4") && !first.count(a+"Joint_5"),"Leaf or degenerate segment has collider");
             const auto &capsule=first.at(a+"Joint_1");
@@ -712,7 +856,7 @@ int main(int argc,char **argv)
                 }
             auto repeat=module.init(scene.stage,scene.ordinal);
             auto second=st::read(scene.stage,scene.ordinal,{"usd-prim-type","omni:fabric:worldMatrix","fbik:joint","height","radius","physics:kinematicEnabled"});
-            require(repeat.convexMeshes==stats.convexMeshes && repeat.capsules==stats.capsules && second.size()==first.size(),"init created duplicates");
+            require(repeat.capsules==stats.capsules && second.size()==first.size(),"init created duplicates");
             module.showColliders(true,scene.ordinal);
             module.showColliders(false,scene.ordinal);
             Physics physics;ovphysx_create_args args=OVPHYSX_CREATE_ARGS_DEFAULT;
@@ -721,27 +865,34 @@ int main(int argc,char **argv)
             const float from[]={3.4f,0,3},direction[]={0,0,-1};
             const ovphysx_scene_query_hit_t *hits=nullptr;uint32_t count=0;
             check(ovphysx_raycast(physics.handle,from,direction,10,false,OVPHYSX_SCENE_QUERY_MODE_CLOSEST,&hits,&count));
-            require(count==1,"Generated hidden hull has no PhysX shape");
+            require(count==1,"Generated hidden capsule has no PhysX shape");
             ovphysx_string_t path{};const auto collider=hits[0].collision;
             check(ovphysx_scene_query_get_paths_from_ids(physics.handle,&collider,1,&path,1,&count));
             require(std::string(path.ptr,path.length).find("__FbikBoneColliders")!=std::string::npos,"Ray missed generated collider");
             void *shape=nullptr;
             check(ovphysx_get_physx_ptr(physics.handle,path,OVPHYSX_PHYSX_TYPE_SHAPE,&shape));
-            require(shape && static_cast<physx::PxShape*>(shape)->getGeometry().getType()==physx::PxGeometryType::eCONVEXMESH,
-                    "PhysX did not cook a convex mesh body shape");
+            require(shape && static_cast<physx::PxShape*>(shape)->getGeometry().getType()==physx::PxGeometryType::eCAPSULE,
+                    "PhysX did not create a capsule body shape");
             auto output=ovphysx::utils::writeWorldTransformsToOvstage(physics.handle,scene.stage,++scene.ordinal);
             require(output.ok(),"Could not publish probe position");st::seal(scene.stage,scene.ordinal);
             auto state=st::read(scene.stage,scene.ordinal,{"omni:fabric:worldMatrix"});
             const auto y=state.at("/World/Probe").at("omni:fabric:worldMatrix").numbers[13];
             std::cout << "Probe contacting generated collider at y=" << y << '\n';
-            require(y>.3 && y<2,"Dynamic probe did not collide with kinematic bone hull");
+            require(y>.3 && y<2,"Dynamic probe did not collide with kinematic bone capsule");
         }
         {
             Scene scene;scene.load(root/"resources/scenes/basic_walk.usda");
             fbik::Module module;auto stats=module.init(scene.stage,scene.ordinal);
-            require(stats.characters==1 && stats.skeletons==1 && stats.convexMeshes==23 && stats.leaves==2 &&
+            require(stats.characters==1 && stats.skeletons==1 && stats.capsules==23 && stats.leaves==2 &&
                     stats.collapsedBones==52 && stats.joints==22 && stats.hinges==4,
                     "SOMA collider/joint count mismatch");
+            const auto &names=module.characters().front().joints;
+            require(std::count(names.begin(),names.end(),"Hips/LeftLeg")==1 &&
+                    std::count(names.begin(),names.end(),"Hips/RightLeg")==1,"Missing SOMA thigh bones");
+            for (const auto &pair:module.collisionExclusions())
+                require(!((pair.bone0=="Hips/LeftLeg" && pair.bone1=="Hips/RightLeg") ||
+                          (pair.bone1=="Hips/LeftLeg" && pair.bone0=="Hips/RightLeg")),
+                        "SOMA thigh capsules must remain collision-enabled");
             viewer::AnimationPlayer animation;
             animation.init(scene.stage,scene.ordinal,module.characters());
             for (double time:{0.0, .017, .5, 4.123, 7.9, 0.0}) {
@@ -769,11 +920,11 @@ int main(int argc,char **argv)
                 for(const auto &[path,prim]:data) if(prim.count("fbik:joint")) {
                     void *shape=nullptr;ovphysx_string_t name{path.c_str(),path.size()};
                     check(ovphysx_get_physx_ptr(physics.handle,name,OVPHYSX_PHYSX_TYPE_SHAPE,&shape));
-                    require(shape && static_cast<physx::PxShape*>(shape)->getGeometry().getType()==physx::PxGeometryType::eCONVEXMESH,
-                            "SOMA bone is missing a cooked convex shape");
+                    require(shape && static_cast<physx::PxShape*>(shape)->getGeometry().getType()==physx::PxGeometryType::eCAPSULE,
+                            "SOMA bone is missing a native capsule shape");
                     ++cooked;
                 }
-                require(cooked==stats.convexMeshes,"Not all SOMA convex meshes were cooked");
+                require(cooked==stats.capsules,"Not all SOMA capsules were created");
             }
             const auto initial=st::read(scene.stage,scene.ordinal,{"omni:fabric:worldMatrix"});
             viewer::Skinning skinning;skinning.init(scene.stage,scene.ordinal,module.characters());
@@ -880,10 +1031,10 @@ int main(int argc,char **argv)
                 require(maxError<.05,"SOMA ragdoll joints separated");
                 physics.stop(scene.ordinal);
             }
-            std::cout << "SOMA: " << stats.convexMeshes << " convex meshes, " << stats.joints << " joints, "
+            std::cout << "SOMA: " << stats.capsules << " capsules, " << stats.joints << " joints, "
                       << stats.collapsedBones << " collapsed bones, " << stats.leaves << " leaves omitted\n";
         }
-        std::cout << "FBIK discovery, bindings, OBBs, fallback capsules, kinematic collision, animation, skinning and repeated init passed.\n";
+        std::cout << "FBIK discovery, bindings, fitted and fallback capsules, kinematic collision, animation, skinning and repeated init passed.\n";
     }
     catch(const std::exception &e) { std::cerr << e.what() << '\n';code=1; }
     if(initialized) ovstage_shutdown();

@@ -1,9 +1,8 @@
 #include "Fbik.h"
-#include "MeshTools/Geometry.h"
-#include "MeshTools/ConvexHull.h"
 #include "StageData.h"
 #include "SkeletonPose.h"
 #include "JointSetup.h"
+#include "CollisionFiltering.h"
 #include <ovx/path_dictionary/path_dictionary_utils.h>
 #include <algorithm>
 #include <cmath>
@@ -144,9 +143,9 @@ void collectSkin(const st::Snapshot &data, const std::string &path, Skeleton &sk
             posed += skinning[joint].transform(p)*float(w);
             restPoint += restSkinning[joint].transform(p)*float(w);
             total += w;
-            // Evaluate the complete skinned position, but filter hull membership only.
+            // Evaluate the complete skinned position, but filter shape membership only.
             // Deduplicate after mapping: a vertex shared by several fingers is
-            // included only once in the hand hull. Keep the per-influence threshold.
+            // included only once in the hand shape. Keep the per-influence threshold.
             if (w > minSkinWeight) bones.insert(owners[joint]);
         }
         if (total==0) continue;
@@ -188,6 +187,7 @@ struct Module::Impl
     std::vector<Character> characters;
     struct Body { std::string path, skeleton; size_t joint; Matrix inBone; };
     std::vector<Body> bodies;
+    std::vector<CollisionExclusion> exclusions;
     st::Query poseQuery;
     std::vector<std::string> joints;
     std::map<std::string,std::vector<int>> parents;
@@ -209,10 +209,10 @@ struct Module::Impl
 };
 Module::Module() : impl(std::make_unique<Impl>()) {}
 Module::~Module() = default;
-InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, float minSkinWeight, BoneShape boneShape)
+InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, float minSkinWeight, float jointDamping)
 {
     require(std::isfinite(minSkinWeight) && minSkinWeight >= 0 && minSkinWeight <= 1, "Minimum skin weight must be between zero and one.");
-    require(boneShape==BoneShape::Convex || boneShape==BoneShape::Capsule, "Unknown bone shape.");
+    require(std::isfinite(jointDamping) && jointDamping>=0,"Joint damping must be finite and nonnegative.");
     require(scene != nullptr, "init needs a populated stage.");
     require(!impl->stage || impl->stage==scene, "Use one module per stage.");
     impl->stage=scene;
@@ -227,6 +227,7 @@ InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, f
     impl->roots.clear();
     impl->characters.clear();
     impl->bodies.clear();
+    impl->exclusions.clear();
     impl->joints.clear();
     impl->parents.clear();
     impl->collisionTopologies.clear();
@@ -253,8 +254,11 @@ InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, f
     require(std::isfinite(units) && units>0,"Invalid stage units.");
     std::ostringstream usd; usd.imbue(std::locale::classic()); usd << std::setprecision(9) << "#usda 1.0\n";
     std::string openRoot;
+    std::vector<collision::Capsule> restCapsules;
+    std::vector<std::string> bodyNames;
     for (auto &[root,skeletons] : characters)
     {
+        const size_t firstBody=impl->bodies.size();
         ++result.characters;
         for (auto &sk : skeletons)
         {
@@ -286,7 +290,7 @@ InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, f
         const auto rootWorld=world(data.at(root));
         const float scale=std::max({rootWorld.A.column0.magnitude(),rootWorld.A.column1.magnitude(),rootWorld.A.column2.magnitude()});
         require(scale>0,"Character has zero scale.");
-        const float minSize=float(0.001/units)/scale; // Minimum full hull thickness: 1 mm in world space.
+        const float minSize=float(0.001/units)/scale; // Minimum full capsule thickness: 1 mm in world space.
         for (size_t si=0; si<skeletons.size(); ++si)
         {
             auto &sk=skeletons[si];
@@ -300,25 +304,11 @@ InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, f
             for (size_t j=0; j<sk.names.size(); ++j)
             {
                 if (topology.owners[j]!=j) { ++result.collapsedBones; continue; }
-                // A named terminal hand/head can still have enough skin for a hull.
+                // A named terminal hand/head can still have enough skin for a capsule.
                 if (sk.children[j].empty() && (!topology.collapsedRoots[j] || sk.points[j].empty()))
                 { ++result.leaves; continue; }
-                const bool mesh=boneShape==BoneShape::Convex && !sk.points[j].empty();
-                ConvexShape hull;
-                Vec3 center(Zero),size(Zero); Quat rotation(Identity); float length=0, radius=0;
-                if (mesh)
-                {
-                    const auto obb=computeOBBFromPoints(sk.points[j]);
-                    center=obb.trans.p; rotation=obb.trans.q; size=obb.halfExtents*2;
-                    size.x=std::max(size.x,minSize); size.y=std::max(size.y,minSize); size.z=std::max(size.z,minSize);
-                    const auto toLocal=inverse(Matrix(Mat33(rotation),center));
-                    std::vector<Vec3> localPoints;localPoints.reserve(sk.points[j].size());
-                    for(const auto &point:sk.points[j]) localPoints.push_back(toLocal.transform(point));
-                    refineConvexHull(localPoints,size*.5f,minSize*.5f,hull);
-                    require(!hull.empty() && hull.volume()>0,"Cannot create convex bone mesh.");
-                    ++result.convexMeshes;
-                }
-                else if (!sk.points[j].empty())
+                Vec3 center(Zero); Quat rotation(Identity); float length=0, radius=0;
+                if (!sk.points[j].empty())
                 {
                     const auto origin=sk.toCharacter.transform(sk.jointPose[j].b);
                     const Vec3 x=boneDirection(sk,j,minSize*0.001f),y=x.perp();
@@ -326,7 +316,7 @@ InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, f
                     const auto toLocal=frame.getTranspose();
                     Bounds3 bounds(Empty);
                     for (const auto &point:sk.points[j]) bounds.include(toLocal*(point-origin));
-                    size=bounds.getDimensions();
+                    const auto size=bounds.getDimensions();
                     center=origin+frame*bounds.getCenter(); rotation=Quat(frame);
                     radius=std::max(std::min(size.y,size.z)*0.5f,minSize*0.5f);
                     length=std::max(0.0f,size.x-2*radius);
@@ -344,39 +334,47 @@ InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, f
                     rotation=Quat(Mat33(x,y,x.cross(y))); center=(a+b)*0.5f; radius=length*0.1f;
                     ++result.capsules;
                 }
-                usd << "def " << (mesh ? "Mesh" : "Capsule") << " \"Joint_" << j << "\" (prepend apiSchemas = [\"PhysicsCollisionAPI\", \"PhysicsRigidBodyAPI\", \"PhysxRigidBodyAPI\""
-                    << (mesh ? ", \"PhysicsMeshCollisionAPI\", \"PhysxConvexHullCollisionAPI\"" : "") << "])\n{\n"
+                const Mat33 axes(rotation);
+                const auto inBone=inverse(sk.toCharacter*sk.jointPose[j])*Matrix(axes,center);
+                const auto capsule=collision::restCapsule(rootWorld*rest[j]*inBone,length,radius);
+                int parent=sk.parents[j];
+                while (parent>=0 && !bodyIndices.count(size_t(parent))) parent=sk.parents[parent];
+                const std::string bodyPath=skeletonRoot+"/Joint_"+std::to_string(j);
+                std::vector<size_t> filtered;
+                for (size_t k=firstBody;k<impl->bodies.size();++k) {
+                    const bool connected=parent>=0 && k==bodyIndices.at(size_t(parent));
+                    if (!connected && !collision::overlaps(capsule,restCapsules[k])) continue;
+                    filtered.push_back(k);
+                    impl->exclusions.push_back({impl->bodies[k].path,bodyPath,bodyNames[k],sk.names[j],
+                        connected ? ExclusionReason::Connected : ExclusionReason::RestOverlap});
+                    if (connected) ++result.connectedExclusions;else ++result.overlapExclusions;
+                }
+                bodyIndices[j]=impl->bodies.size();
+                bodyPoses.emplace(j,Matrix(axes,center));
+                impl->bodies.push_back({bodyPath,sk.path,j,inBone});
+                restCapsules.push_back(capsule);bodyNames.push_back(sk.names[j]);
+                usd << "def Capsule \"Joint_" << j << "\" (prepend apiSchemas = [\"PhysicsCollisionAPI\", \"PhysicsRigidBodyAPI\", \"PhysxRigidBodyAPI\""
+                    << (filtered.empty() ? "" : ", \"PhysicsFilteredPairsAPI\"")
+                    << "])\n{\n"
                     << "custom token fbik:joint = " << quote(sk.names[j]) << "\ncustom rel fbik:skeleton = <" << sk.path << ">\n"
                     << "bool physics:rigidBodyEnabled = true\nbool physics:kinematicEnabled = true\n"
                     << "bool physxRigidBody:disableGravity = false\ncustom bool fbik:quasiStatic = false\n"
                     // Tight internal limits need extra iterations along the connected body chain.
                     << "int physxRigidBody:solverPositionIterationCount = 32\nint physxRigidBody:solverVelocityIterationCount = 4\n"
-                    << "bool physics:collisionEnabled = true\ncolor3f[] primvars:displayColor = " << (mesh ? "[(0.15,0.65,0.95)]" : "[(0.95,0.65,0.1)]") << "\n";
-                Mat33 axes(rotation);
-
-                bodyIndices[j]=impl->bodies.size();
-                bodyPoses.emplace(j,Matrix(axes,center));
-                impl->bodies.push_back({skeletonRoot+"/Joint_"+std::to_string(j),
-                    sk.path,j,inverse(sk.toCharacter*sk.jointPose[j])*Matrix(axes,center)});
+                    << "bool physics:collisionEnabled = true\ncolor3f[] primvars:displayColor = [(0.95,0.65,0.1)]\n";
+                // USD pair filters are symmetric; author each pair on its later body only.
+                if (!filtered.empty()) {
+                    usd << "rel physics:filteredPairs = [";
+                    for (size_t k=0;k<filtered.size();++k)
+                        usd << (k ? "," : "") << '<' << impl->bodies[filtered[k]].path << '>';
+                    usd << "]\n";
+                }
                 pose(usd,center,rotation);
-                if (mesh)
-                {
-                    usd << "uniform token subdivisionScheme = \"none\"\nuniform token physics:approximation = \"convexHull\"\n"
-                        << "int physxConvexHullCollision:hullVertexLimit = 255\npoint3f[] points = [";
-                    for(size_t v=0;v<hull.vertices.size();++v) { if(v) usd << ',';vector(usd,hull.vertices[v]); }
-                    usd << "]\nint[] faceVertexCounts = [";
-                    for(size_t f=0;f<hull.face_sizes.size();++f) {if(f) usd << ',';usd << hull.face_sizes[f];}
-                    usd << "]\nint[] faceVertexIndices = [";
-                    for(size_t k=0;k<hull.indices.size();++k) {if(k) usd << ',';usd << hull.indices[k];}
-                    usd << "]\nuniform token[] xformOpOrder = [\"xformOp:translate\",\"xformOp:orient\"]\n";
-                }
-                else {
-                    const Vec3 extent(length*0.5f+radius,radius,radius);
-                    usd << "double height = " << length << "\ndouble radius = " << radius
-                        << "\nuniform token axis = \"X\"\nfloat3[] extent = [";
-                    vector(usd,-extent);usd << ',';vector(usd,extent);
-                    usd << "]\nuniform token[] xformOpOrder = [\"xformOp:translate\",\"xformOp:orient\"]\n";
-                }
+                const Vec3 extent(length*0.5f+radius,radius,radius);
+                usd << "double height = " << length << "\ndouble radius = " << radius
+                    << "\nuniform token axis = \"X\"\nfloat3[] extent = [";
+                vector(usd,-extent);usd << ',';vector(usd,extent);
+                usd << "]\nuniform token[] xformOpOrder = [\"xformOp:translate\",\"xformOp:orient\"]\n";
                 usd << "}\n";
             }
             for (const auto &[j,index] : bodyIndices)
@@ -394,11 +392,16 @@ InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, f
                 const auto &childBody=impl->bodies[index];
                 const Quat local0(inverse(rest[p]*parentBody.inBone).A*setup.parentFrame);
                 const Quat local1(inverse(rest[j]*childBody.inBone).A*setup.childFrame);
-                usd << "def " << (limits.hinge ? "PhysicsRevoluteJoint " : "PhysicsJoint ") << quote(jointName);
+                const std::vector<const char*> driveAxes=limits.hinge ? std::vector<const char*>{"angular"}
+                    : std::vector<const char*>{"rotX","rotY","rotZ"};
+                usd << "def " << (limits.hinge ? "PhysicsRevoluteJoint " : "PhysicsJoint ") << quote(jointName)
+                    << " (prepend apiSchemas = [";
+                for (size_t axis=0;axis<driveAxes.size();++axis)
+                    usd << (axis ? "," : "") << "\"PhysicsDriveAPI:" << driveAxes[axis] << '"';
                 if (!limits.hinge)
-                    usd << " (prepend apiSchemas = [\"PhysicsLimitAPI:transX\",\"PhysicsLimitAPI:transY\",\"PhysicsLimitAPI:transZ\","
-                           "\"PhysicsLimitAPI:rotX\",\"PhysicsLimitAPI:rotY\",\"PhysicsLimitAPI:rotZ\"])";
-                usd << "\n{\nrel physics:body0 = <" << parentBody.path << ">\n"
+                    usd << ",\"PhysicsLimitAPI:transX\",\"PhysicsLimitAPI:transY\",\"PhysicsLimitAPI:transZ\","
+                           "\"PhysicsLimitAPI:rotX\",\"PhysicsLimitAPI:rotY\",\"PhysicsLimitAPI:rotZ\"";
+                usd << "])\n{\nrel physics:body0 = <" << parentBody.path << ">\n"
                     << "rel physics:body1 = <" << impl->bodies[index].path << ">\n"
                     << "point3f physics:localPos0 = ";
                 vector(usd,inverse(bodyPoses.at(size_t(p))).transform(anchor));
@@ -408,6 +411,14 @@ InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, f
                     << "quatf physics:localRot1 = (" << local1.w << ',' << local1.x << ',' << local1.y << ',' << local1.z << ")\n"
                     << "bool physics:jointEnabled = false\nbool physics:collisionEnabled = false\n"
                     << "bool physics:excludeFromArticulation = true\n";
+                // Acceleration drives damp relative rotation independently of body inertia.
+                // The USD importer multiplies angular gains by 180/pi; author its inverse
+                // so PhysX receives the requested decay rate. Zero stiffness adds no pose spring.
+                for (const auto *axis:driveAxes)
+                    usd << "uniform token drive:" << axis << ":physics:type = \"acceleration\"\n"
+                        << "float drive:" << axis << ":physics:stiffness = 0\n"
+                        << "float drive:" << axis << ":physics:damping = " << jointDamping*(Pi/180) << '\n'
+                        << "float drive:" << axis << ":physics:targetVelocity = 0\n";
                 if (limits.hinge) {
                     ++result.hinges;
                     usd << "uniform token physics:axis = \"X\"\nfloat physics:lowerLimit = " << limits.lower
@@ -432,17 +443,6 @@ InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, f
         usd << "}\n";
     }
     closePath(usd, openRoot);
-    if (!impl->bodies.empty())
-    {
-        std::string group="__FbikBoneCollisionGroup";
-        while (data.count("/"+group)) group+="_";
-        usd << "def PhysicsCollisionGroup " << quote(group) << "\n{\n"
-            << "rel physics:filteredGroups = </" << group << ">\n"
-            << "rel collection:colliders:includes = [";
-        for (size_t i=0;i<impl->bodies.size();++i)
-            usd << (i ? "," : "") << '<' << impl->bodies[i].path << '>';
-        usd << "]\n}\n";
-    }
     if (!characters.empty())
     {
         const auto content=usd.str();
@@ -457,6 +457,7 @@ InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, f
     return result;
 }
 const std::vector<Character> &Module::characters() const { return impl->characters; }
+const std::vector<CollisionExclusion> &Module::collisionExclusions() const { return impl->exclusions; }
 std::vector<BodyTarget> Module::updateTargets(const std::vector<Pose> &poses) const
 {
     const auto lookup=impl->poseLookup(poses);

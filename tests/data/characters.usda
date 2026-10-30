@@ -73,7 +73,7 @@ def Xform "World"
             uniform token[] skel:joints = ["root/other", "root"]
             rel skel:skeleton = </World/A/Rig>
         }
-        # Extreme vertices with weak root and branch influences must not enlarge their hulls.
+        # Extreme vertices with weak root and branch influences must not enlarge their capsules.
         def Mesh "WeakOutliers" (prepend apiSchemas = ["SkelBindingAPI"]) {
             point3f[] points = [(100, 100, 100), (-100, -100, -100), (100, -100, 0)]
             int[] faceVertexCounts = [3]

@@ -83,6 +83,8 @@ int main(int argc, char **argv)
             rtx.load((root / "resources/scenes/basic_walk.usda").u8string(), 640, 480);
             require(rtx.characterJointCount() > 0 && rtx.characterRadius() > 0,
                     "Character framing data is missing");
+            require(rtx.collisionExclusions().size()>=22,
+                    "Viewer did not expose the initialized collision exclusions");
             require(std::abs(rtx.animationStart()) < 1e-6 && std::abs(rtx.animationEnd() - 8) < 1e-6,
                     "Timeline did not read the USD time range in seconds");
             const auto initialCharacter = rtx.characterCenter();
@@ -281,9 +283,11 @@ int main(int argc, char **argv)
             require(rtx.characterJointCount() == 0 && rtx.boneColliderCount() == 0,
                     "Falling box retained a character after replacing Basic walk");
             rtx.render(camera, 640, 480);
-            rtx.load((root / "tests/data/capsules.usda").u8string(), 640, 480, fbik::BoneShape::Capsule);
-            require(rtx.boneColliderCount()==3 && rtx.boneShape()==fbik::BoneShape::Capsule,
-                    "Viewer did not initialize the capsule fixture with the selected shape");
+            rtx.load((root / "tests/data/capsules.usda").u8string(), 640, 480);
+            require(rtx.boneColliderCount()==3,
+                    "Viewer did not initialize the capsule fixture with capsules");
+            require(rtx.collisionExclusions().size()==1,
+                    "Reload did not replace the collision exclusion report");
             camera.init();camera.look_at({25,20,30},{8,8,4});
             const auto orangePixels=[&] {
                 for (int i=0;i<6;++i) rtx.render(camera,640,480);

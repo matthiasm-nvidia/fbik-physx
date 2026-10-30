@@ -1,0 +1,44 @@
+#usda 1.0
+(defaultPrim = "World"; metersPerUnit = 1; upAxis = "Y")
+
+def Xform "World" {
+    def PhysicsScene "Physics" (prepend apiSchemas = ["PhysxSceneAPI"]) {
+        vector3f physics:gravityDirection = (0,-1,0)
+        float physics:gravityMagnitude = 0
+        bool physxScene:enableGPUDynamics = false
+        token physxScene:broadphaseType = "MBP"
+    }
+    # Two isolated pairs, each with one generated joint and no external forces.
+    def SkelRoot "Ball" {
+        def Skeleton "Rig" {
+            uniform token[] joints = ["Root","Root/RightArm","Root/RightArm/Tip"]
+            uniform matrix4d[] bindTransforms = [
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,0,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(1,0,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(2,0,0,1))
+            ]
+            uniform matrix4d[] restTransforms = [
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,0,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(1,0,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(1,0,0,1))
+            ]
+        }
+    }
+    def SkelRoot "Hinge" {
+        double3 xformOp:translate = (10,0,0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Skeleton "Rig" {
+            uniform token[] joints = ["RightArm","RightArm/RightForeArm","RightArm/RightForeArm/Tip"]
+            uniform matrix4d[] bindTransforms = [
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,0,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(1,0,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(2,0,0,1))
+            ]
+            uniform matrix4d[] restTransforms = [
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(0,0,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(1,0,0,1)),
+                ((1,0,0,0),(0,1,0,0),(0,0,1,0),(1,0,0,1))
+            ]
+        }
+    }
+}

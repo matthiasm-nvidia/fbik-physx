@@ -46,6 +46,8 @@ def Xform "World"
             ]
         }
     }
-    # Deliberately coincident: all bone-to-bone collisions must be filtered.
-    def SkelRoot "B" (prepend references = </World/A>) {}
+    # Separate characters should have matching local trajectories without touching.
+    def SkelRoot "B" (prepend references = </World/A>) {
+        double3 xformOp:translate = (6, 0, 0)
+    }
 }

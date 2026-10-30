@@ -116,7 +116,6 @@ struct Scene
     bool skinDirty = false, physicsPoseDirty = false;
     std::vector<fbik::Pose> skinPoses;
     fbik::InitResult characterStats;
-    fbik::BoneShape boneShape = fbik::BoneShape::Convex;
     std::vector<fbik::Pose> referencePoses;
     bool showBones = false, animationPlaying = false, animationLoop = false;
     double animationTime = 0, animationStart = 0, animationEnd = 0;
@@ -492,7 +491,7 @@ void RtxView::initialize(const std::string &executableDirectory)
     }
 }
 
-void RtxView::load(const std::string &path, int width, int height, fbik::BoneShape boneShape)
+void RtxView::load(const std::string &path, int width, int height)
 {
     if (!impl->initialized)
         throw std::runtime_error("Renderer is not initialized.");
@@ -549,14 +548,15 @@ void RtxView::load(const std::string &path, int width, int height, fbik::BoneSha
                                         candidate->ordinal, candidate->ordinal + 1));
     ++candidate->ordinal;
     candidate->seal();
-    candidate->characterStats = candidate->characterPhysics.init(candidate->stage, candidate->ordinal, 0.3f, boneShape);
-    candidate->boneShape = boneShape;
+    candidate->characterStats = candidate->characterPhysics.init(candidate->stage, candidate->ordinal);
     candidate->skinning.init(candidate->stage,candidate->ordinal,candidate->characterPhysics.characters());
     candidate->animation.init(candidate->stage,candidate->ordinal,candidate->characterPhysics.characters());
     const auto &stats = candidate->characterStats;
-    std::printf("FBIK: %zu characters, %zu skeletons, %zu convex meshes, %zu capsules, %zu collapsed bones, %zu leaves skipped, %zu degenerate segments skipped\n",
-                stats.characters, stats.skeletons, stats.convexMeshes, stats.capsules, stats.collapsedBones, stats.leaves, stats.degenerate);
+    std::printf("FBIK: %zu characters, %zu skeletons, %zu capsules, %zu collapsed bones, %zu leaves skipped, %zu degenerate segments skipped\n",
+                stats.characters, stats.skeletons, stats.capsules, stats.collapsedBones, stats.leaves, stats.degenerate);
     std::printf("FBIK joints: %zu hinges, %zu ball joints with angular limits\n",stats.hinges,stats.joints-stats.hinges);
+    std::printf("FBIK collision exclusions: %zu connected, %zu rest capsule overlaps\n",
+                stats.connectedExclusions,stats.overlapExclusions);
     frameBounds(*candidate);
     candidate->initialCamera = readStageCamera(candidate->stage, candidate->ordinal);
     if (candidate->initialCamera)
@@ -883,13 +883,14 @@ bool RtxView::dragging() const
 
 size_t RtxView::boneColliderCount() const
 {
-    return impl->scene ? impl->scene->characterStats.convexMeshes + impl->scene->characterStats.capsules : 0;
-}
-fbik::BoneShape RtxView::boneShape() const
-{
-    return impl->scene ? impl->scene->boneShape : fbik::BoneShape::Convex;
+    return impl->scene ? impl->scene->characterStats.capsules : 0;
 }
 bool RtxView::boneCollidersVisible() const { return impl->scene && impl->scene->showBones; }
+const std::vector<fbik::CollisionExclusion> &RtxView::collisionExclusions() const
+{
+    static const std::vector<fbik::CollisionExclusion> empty;
+    return impl->scene ? impl->scene->characterPhysics.collisionExclusions() : empty;
+}
 void RtxView::showBoneColliders(bool visible)
 {
     if (!impl->scene) return;

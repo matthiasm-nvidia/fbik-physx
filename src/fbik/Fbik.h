@@ -17,7 +17,12 @@ struct InitResult
     size_t connectedExclusions = 0, overlapExclusions = 0;
 };
 
-enum class Mode { Follow, Ragdoll, QuasiStatic };
+enum class Mode { Kinematic, Follow, Ragdoll, QuasiStatic };
+inline bool usesAnimation(Mode mode) { return mode==Mode::Kinematic || mode==Mode::Follow; }
+struct FollowSettings {
+    // Acceleration-drive gains, shared by linear and angular tracking (1/s^2 and 1/s).
+    float stiffness = 400, damping = 40;
+};
 enum class ExclusionReason { Connected, RestOverlap };
 struct CollisionExclusion {
     std::string body0, body1, bone0, bone1;
@@ -43,7 +48,7 @@ class Module
     ~Module();
     Module(const Module &) = delete;
     Module &operator=(const Module &) = delete;
-    // Starts in Follow mode. Only weights strictly above minSkinWeight contribute to a shape.
+    // Starts in Kinematic mode. Only weights strictly above minSkinWeight contribute to a shape.
     // Hands/wrists and heads absorb descendant skin and omit descendant physics joints.
     // Joint frames/limits use the rest pose; the physics wrapper applies fbik:swingLimit cones.
     // Connected bodies and capsules overlapping in the rest pose are filtered once at init.
@@ -55,12 +60,14 @@ class Module
     std::vector<BodyTarget> updateTargets(const std::vector<Pose> &poses) const;
     // Authors a sealed control ordinal; the caller must submit it to physics before stepping.
     // A repeated mode is a no-op. Transitions clear velocities and release bodies awake.
+    // Follow enables world-target spring joints and disables character gravity.
     // QuasiStatic disables gravity; the physics wrapper clears velocities each tick
     // on bodies tagged fbik:quasiStatic while leaving contacts and joints active.
     void setMode(Mode mode, ovstage_ordinal_t &ordinal);
     Mode mode() const;
     // Read after physics publishes its poses. Reference poses preserve character placement
-    // and local transforms of bones without bodies; capture them on leaving Follow.
+    // and local transforms of bones without bodies; update them from animation in Follow,
+    // or capture them on entering Ragdoll/QuasiStatic.
     std::vector<Pose> readPoses(const std::vector<Pose> &referencePoses, ovstage_ordinal_t ordinal) const;
     void showColliders(bool visible, ovstage_ordinal_t &ordinal);
 

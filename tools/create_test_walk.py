@@ -1,77 +1,171 @@
-"""Generate the small SOMA collision-test walk. Requires Python USD only to regenerate.
-This is a procedural test gait, not a motion-capture/Mixamo animation.
+"""Retarget the bundled CC0 Quaternius Walk_Loop onto SOMA.
+
+Run with Python/OpenUSD (Blender 5.1's bundled Python works). Runtime playback
+only needs the generated USD clip. Source provenance: resources/animations/README.md.
 """
 from pathlib import Path
+from statistics import median
 import math
-from pxr import Usd, UsdSkel, Gf, Vt
-root = Path(__file__).resolve().parents[1]
-source = Usd.Stage.Open(str(root / 'resources/scenes/soma.usd'))
-skel = UsdSkel.Skeleton.Get(source, '/OUTPUT/c_skeleton_grp/Root')
-cache = UsdSkel.Cache(); cache.Populate(UsdSkel.Root.Get(source, '/OUTPUT'), Usd.PrimDefaultPredicate)
-query = cache.GetSkelQuery(skel)
-names = list(skel.GetJointsAttr().Get())
-local = query.ComputeJointLocalTransforms(0)
-global_pose = query.ComputeJointSkelTransforms(0)
-parents = list(query.GetTopology().GetParentIndices())
-trs = [UsdSkel.DecomposeTransform(m) for m in local]
-walk = Usd.Stage.CreateInMemory()
-walk.SetTimeCodesPerSecond(60);walk.SetStartTimeCode(0);walk.SetEndTimeCode(480)
-a = UsdSkel.Animation.Define(walk, '/Walk')
-a.CreateJointsAttr(names)
-a.CreateScalesAttr(Vt.Vec3hArray([v[2] for v in trs]))
-translations=a.CreateTranslationsAttr();rotations=a.CreateRotationsAttr()
-for frame in range(0,481,2):
- t=frame/60
- moving=max(0,min(t-1.25,5.5))
- blend=min(moving/.35,1)*min(max(0,5.5-moving)/.35,1)
- phase=2*math.pi*moving/1.05
- ts=[];qs=[]
- for i,name in enumerate(names):
-  leaf=name.rsplit('/',1)[-1];p,q,scale=trs[i];p=Gf.Vec3f(p);q=Gf.Quatf(q)
-  side=1 if leaf.startswith('Left') else -1
-  if leaf in ('LeftArm','RightArm'):
-   parent_rotation=Gf.Matrix4d(global_pose[parents[i]]).ExtractRotation()
-   down_axis=parent_rotation.GetInverse().TransformDir(Gf.Vec3d(0,0,1))
-   q=Gf.Quatf(Gf.Rotation(down_axis,-70*side).GetQuat())*q
-  angle=0
-  if leaf in ('LeftLeg','RightLeg'):angle=24*math.sin(phase+(0 if side==1 else math.pi))*blend
-  elif leaf in ('LeftShin','RightShin'):angle=32*max(0,math.sin(phase+(0 if side==1 else math.pi)))*blend
-  elif leaf in ('LeftArm','RightArm'):angle=-18*math.sin(phase+(0 if side==1 else math.pi))*blend
-  if angle:
-   parent_rotation=Gf.Matrix4d(global_pose[parents[i]]).ExtractRotation()
-   axis=parent_rotation.GetInverse().TransformDir(Gf.Vec3d(1,0,0))
-   q=Gf.Quatf(Gf.Rotation(axis,angle).GetQuat())*q
-  if leaf=='Hips':p[1]+=1.5*(1-math.cos(phase*2))*blend
-  ts.append(p);qs.append(q)
- translations.Set(Vt.Vec3fArray(ts),frame);rotations.Set(Vt.QuatfArray(qs),frame)
-walk.SetDefaultPrim(a.GetPrim())
-walk.GetRootLayer().Export(str(root/'resources/scenes/soma_walk.usda'))
-# Scene placement is kept separate from the reusable skeletal clip.
-p=root/'resources/scenes/basic_walk.usda'
-s=p.read_text()
-s=s.replace('    upAxis = "Y"','    upAxis = "Y"\n    startTimeCode = 0\n    endTimeCode = 480\n    timeCodesPerSecond = 60')
-s=s.replace('        double3 xformOp:scale', '''        double3 xformOp:translate.timeSamples = {
-            0: (2, 0, 0),
-            75: (2, 0, 0),
-            405: (-1.575, 0, 0),
-            480: (-1.575, 0, 0),
-        }
-        float xformOp:rotateY = -90
-        double3 xformOp:scale''',1)
-s=s.replace('["xformOp:translate", "xformOp:scale"]','["xformOp:translate", "xformOp:rotateY", "xformOp:scale"]',1)
-s=s.replace('''        {
-        }
-    }
-''','''        {
-            over "c_skeleton_grp" {
-                over "Root" {
-                    rel skel:animationSource = </World/Walk>
-                }
-            }
-        }
-    }
-    def SkelAnimation "Walk" (prepend references = @soma_walk.usda@</Walk>) {}
-''',1)
-# Do not reapply scene changes when regenerating just the clip.
-if '@soma_walk.usda@' not in p.read_text():p.write_text(s)
+from pxr import Gf, Usd, UsdGeom, UsdSkel, Vt
 
+ROOT = Path(__file__).resolve().parents[1]
+FPS = 60
+START, STOP, END = 1.25, 6.75, 8.0
+TRAVEL_SPEED = 0.65  # metres/second, matching basic_walk.usda and two_characters.usda
+SOURCE_FPS, CYCLE = 30, 40
+
+
+def quat(matrix):
+    return Gf.Quatf(matrix.ExtractRotationQuat()).GetNormalized()
+
+
+def average(values):
+    reference = values[0]
+    result = Gf.Quatf(0, Gf.Vec3f(0))
+    for value in values:
+        result += value if Gf.Dot(reference, value) >= 0 else -value
+    return result.GetNormalized()
+
+
+def smooth(value):
+    value = max(0, min(1, value))
+    return value * value * (3 - 2 * value)
+
+
+def main():
+    source = Usd.Stage.Open(str(ROOT / 'resources/animations/quaternius_walk.usdc'))
+    src_skel = UsdSkel.Skeleton.Get(source, '/Source/Skeleton')
+    src_anim = UsdSkel.Animation.Get(source, '/Source/Walk')
+    src_names = list(src_skel.GetJointsAttr().Get())
+    src_indices = {name.rsplit('/', 1)[-1]: i for i, name in enumerate(src_names)}
+    src_topology = UsdSkel.Topology(src_names)
+    src_rest = UsdSkel.ConcatJointTransforms(src_topology, src_skel.GetRestTransformsAttr().Get())
+
+    target = Usd.Stage.Open(str(ROOT / 'resources/scenes/soma.usd'))
+    skel = UsdSkel.Skeleton.Get(target, '/OUTPUT/c_skeleton_grp/Root')
+    names = list(skel.GetJointsAttr().Get())
+    leaves = [name.rsplit('/', 1)[-1] for name in names]
+    indices = {name: i for i, name in enumerate(leaves)}
+    topology = UsdSkel.Topology(names)
+    parents = list(topology.GetParentIndices())
+    cache = UsdSkel.Cache()
+    cache.Populate(UsdSkel.Root.Get(target, '/OUTPUT'), Usd.PrimDefaultPredicate)
+    query = cache.GetSkelQuery(skel)
+    rest_local = query.ComputeJointLocalTransforms(0)
+    rest = UsdSkel.ConcatJointTransforms(topology, rest_local)
+    trs = [UsdSkel.DecomposeTransform(m) for m in rest_local]
+    positions = [Gf.Vec3f(t[0]) for t in trs]
+    scales = Vt.Vec3hArray([t[2] for t in trs])
+    mapping = {'Hips': 'pelvis', 'Spine1': 'spine_01', 'Spine2': 'spine_02',
+               'Chest': 'spine_03', 'Neck1': 'neck_01', 'Neck2': 'neck_01', 'Head': 'Head'}
+    for side, suffix in [('Left', 'l'), ('Right', 'r')]:
+        for dst, src in [('Shoulder', 'clavicle'), ('Arm', 'upperarm'), ('ForeArm', 'lowerarm'),
+                         ('Hand', 'hand'), ('Leg', 'thigh'), ('Shin', 'calf'), ('Foot', 'foot'),
+                         ('ToeBase', 'ball')]:
+            mapping[side + dst] = src + '_' + suffix
+    mapping = {indices[dst]: src_indices[src] for dst, src in mapping.items()}
+    src_hip = src_indices['pelvis']
+    # Scale root bob/sway by leg length, preserving SOMA's own rest translations.
+    def leg_length(world, hip, knee, foot):
+        p = [world[i].ExtractTranslation() for i in (hip, knee, foot)]
+        return (p[1] - p[0]).GetLength() + (p[2] - p[1]).GetLength()
+    motion_scale = leg_length(rest, indices['LeftLeg'], indices['LeftShin'], indices['LeftFoot']) / leg_length(
+        src_rest, src_indices['thigh_l'], src_indices['calf_l'], src_indices['foot_l'])
+
+    def retarget(frame):
+        src_world = UsdSkel.ConcatJointTransforms(src_topology, UsdSkel.MakeTransforms(
+            src_anim.GetTranslationsAttr().Get(frame), src_anim.GetRotationsAttr().Get(frame),
+            src_anim.GetScalesAttr().Get(frame)))
+        local, world = [], []
+        for i in range(len(names)):
+            parent = world[parents[i]] if parents[i] >= 0 else Gf.Quatf(1)
+            if i in mapping:
+                j = mapping[i]
+                # Rest-frame conversion handles different bone rolls and joint axes.
+                desired = quat(src_world[j]) * quat(src_rest[j]).GetInverse() * quat(rest[i])
+                rotation = parent.GetInverse() * desired
+            else:
+                rotation = Gf.Quatf(trs[i][1])
+            local.append(rotation.GetNormalized())
+            world.append((parent * rotation).GetNormalized())
+        delta = (src_world[src_hip].ExtractTranslation() - src_rest[src_hip].ExtractTranslation()) * motion_scale
+        return local, Gf.Vec3f(delta)
+
+    cycle = [retarget(frame) for frame in range(CYCLE)]
+    idle = [average([q[i] for q, _ in cycle]) for i in range(len(names))]
+    # Neutral legs and a relaxed, slightly bent upper body for the held start/end pose.
+    for i, name in enumerate(leaves):
+        if i == 0 or name.startswith(('LeftLeg', 'RightLeg', 'LeftShin', 'RightShin',
+                                       'LeftFoot', 'RightFoot', 'LeftToe', 'RightToe')):
+            idle[i] = Gf.Quatf(trs[i][1])
+
+    # Calibrate cadence from the retargeted stance feet, not a guessed cycle duration.
+    feet = [indices['LeftToeBase'], indices['RightToeBase']]
+    foot_samples = []
+    for frame in range(CYCLE + 1):
+        q, delta = retarget(frame)
+        t = Vt.Vec3fArray(positions)
+        t[0] += delta
+        world = UsdSkel.ConcatJointTransforms(topology, UsdSkel.MakeTransforms(t, Vt.QuatfArray(q), scales))
+        foot_samples.append([world[i].ExtractTranslation() for i in feet])
+    speeds = []
+    for foot in range(2):
+        ground = min(sample[foot][1] for sample in foot_samples)
+        for a, b in zip(foot_samples, foot_samples[1:]):
+            speed = (a[foot][2] - b[foot][2]) * SOURCE_FPS * .01
+            if max(a[foot][1], b[foot][1]) < ground + 3 and speed > .2:
+                speeds.append(speed)
+    if not speeds:
+        raise RuntimeError('No stance samples for cadence calibration')
+    natural_speed = median(speeds)
+    rate = TRAVEL_SPEED / natural_speed
+
+    inverse_bind = [m.GetInverse() for m in skel.GetBindTransformsAttr().Get()]
+    meshes = [(cache.GetSkinningQuery(prim), UsdGeom.Mesh(prim).GetPointsAttr().Get())
+              for prim in target.Traverse() if prim.IsA(UsdGeom.Mesh) and cache.GetSkinningQuery(prim)]
+
+    def ground_height(translations, rotations):
+        world = UsdSkel.ConcatJointTransforms(topology, UsdSkel.MakeTransforms(translations, rotations, scales))
+        transforms = Vt.Matrix4dArray([bind * joint for bind, joint in zip(inverse_bind, world)])
+        low = math.inf
+        for skin, original in meshes:
+            points = Vt.Vec3fArray(original)
+            if not skin.ComputeSkinnedPoints(transforms, points, 0):
+                raise RuntimeError('Unable to skin SOMA for floor clearance')
+            low = min(low, min(p[1] for p in points))
+        return low
+
+    walk = Usd.Stage.CreateInMemory()
+    walk.SetTimeCodesPerSecond(FPS)
+    walk.SetStartTimeCode(0)
+    walk.SetEndTimeCode(int(END * FPS))
+    anim = UsdSkel.Animation.Define(walk, '/Walk')
+    walk.SetDefaultPrim(anim.GetPrim())
+    anim.CreateJointsAttr(names)
+    anim.CreateScalesAttr(scales)
+    translations, rotations = anim.CreateTranslationsAttr(), anim.CreateRotationsAttr()
+    previous = None
+    for frame in range(int(END * FPS) + 1):
+        seconds = frame / FPS
+        elapsed = max(0, min(seconds - START, STOP - START))
+        blend = smooth((seconds - START) / .4) * smooth((STOP - seconds) / .4)
+        animated, delta = retarget((elapsed * SOURCE_FPS * rate) % CYCLE)
+        q = Vt.QuatfArray([Gf.Slerp(blend, a, b).GetNormalized() for a, b in zip(idle, animated)])
+        if previous is not None:
+            q = Vt.QuatfArray([b if Gf.Dot(a, b) >= 0 else -b for a, b in zip(previous, q)])
+        t = Vt.Vec3fArray(positions)
+        t[0] += delta * blend
+        # Keep the lowest point of the actual skinned soles 5 mm above the floor.
+        t[0] += Gf.Vec3f(0, .5 - ground_height(t, q), 0)
+        translations.Set(t, frame)
+        rotations.Set(q, frame)
+        previous = q
+    walk.GetRootLayer().customLayerData = {'source': 'Quaternius Walk_Loop, CC0-1.0',
+                                          'retargetedBy': 'tools/create_test_walk.py',
+                                          'sourcePlaybackRate': rate}
+    walk.GetRootLayer().Export(str(ROOT / 'resources/scenes/soma_walk.usda'))
+    print(f'Retargeted {len(mapping)} joints; stance speed {natural_speed:.3f} m/s; playback rate {rate:.3f}')
+
+
+if __name__ == '__main__':
+    main()

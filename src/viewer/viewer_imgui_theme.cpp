@@ -144,9 +144,9 @@ void apply_kit_dark_style()
     colors[ImGuiCol_CheckMark] = ImVec4(0.20f, 0.70f, 0.95f, 1.0f);
     colors[ImGuiCol_SliderGrab] = ImVec4(0.388f, 0.388f, 0.388f, 1.0f);
     colors[ImGuiCol_SliderGrabActive] = ImVec4(0.490f, 0.490f, 0.490f, 1.0f);
-    colors[ImGuiCol_Button] = ImVec4(0.133f, 0.133f, 0.133f, 1.0f);
-    colors[ImGuiCol_ButtonHovered] = ImVec4(0.192f, 0.192f, 0.192f, 1.0f);
-    colors[ImGuiCol_ButtonActive] = ImVec4(0.0f, 0.376f, 0.780f, 1.0f);
+    colors[ImGuiCol_Button] = ImVec4(0.0f, 0.310f, 0.650f, 1.0f);
+    colors[ImGuiCol_ButtonHovered] = ImVec4(0.0f, 0.376f, 0.780f, 1.0f);
+    colors[ImGuiCol_ButtonActive] = ImVec4(0.0f, 0.250f, 0.540f, 1.0f);
     colors[ImGuiCol_Header] = ImVec4(0.133f, 0.133f, 0.133f, 1.0f);
     colors[ImGuiCol_HeaderHovered] = ImVec4(0.192f, 0.192f, 0.192f, 1.0f);
     colors[ImGuiCol_HeaderActive] = ImVec4(0.220f, 0.220f, 0.220f, 1.0f);

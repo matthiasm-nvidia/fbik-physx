@@ -3,7 +3,7 @@
 A Windows USD viewer with ovphysx simulation, OpenGL, GLFW, Dear ImGui, ovstage, and ovrtx.
 It retains the FBIK viewer's ImGui theme, fonts, camera navigation, and Windows
 build setup. USD animation playback, kinematic character collision, and dynamic
-ragdolls are implemented; animation drives and IK are future work.
+ragdolls are implemented. Dynamic Follow mode uses PhysX animation drives; custom IK remains future work.
 
 ## Build and run
 
@@ -22,7 +22,8 @@ run.bat
 All sources, fonts, third-party libraries, and SDK paths are local to this project;
 building and running do not require the original FBIK checkout.
 
-The viewer starts empty. Click **Load USD...** to open a `.usd`, `.usda`, `.usdc`,
+The viewer opens the **Basic walk** demo in **Follow** mode on startup, with playback paused.
+Click **Load USD...** to open a `.usd`, `.usda`, `.usdc`,
 or `.usdz` file, or select a previously opened file from **Recent**. The last
 ten successfully loaded paths are stored in `.cache/recent-usd.txt` across runs.
 The current file's full path appears in the window title. Hover over a recent
@@ -61,7 +62,7 @@ The compact panel follows the original FBIK viewer: load/reload, **Scene**, **In
 and **Camera controls**. **Recent** retains this viewer's file history.
 
 The editable sample is `resources/scenes/falling_box.usda` (copied beside the
-executable by the build). It uses meters, Y-up, gravity of 9.81 m/s², a 1 kg box with 10 cm sides
+executable by the build). It uses meters, Y-up, gravity of 9.81 m/sÂ², a 1 kg box with 10 cm sides
 with rigid-body and collision APIs, and a 5 m by 5 m static floor whose top is y=0. The box starts with its center 1 m above the floor. It has no character.
 The sample explicitly selects CPU physics; RTX still renders on the GPU.
 Other loaded USD files need enabled rigid bodies and collision/scene settings.
@@ -83,8 +84,8 @@ simulation time. Body poses are written back to the shared in-memory ovstage,
 including child geometry. Physics output is never fed back as new physics input.
 Source USD files are unchanged.
 
-Bone targets use cached, ordered path queries and one batched local/world transform
-write per physics tick. Skeleton topology, rest poses, animation mappings, and mesh
+Kinematic targets use cached, ordered path queries and one batched local/world transform
+write per physics tick. Follow updates native spring targets instead. Skeleton topology, rest poses, animation mappings, and mesh
 bindings are cached when a scene loads. Intermediate catch-up ticks stay in PhysX;
 body output, ragdoll reconstruction, and skinning are published once for the displayed
 frame (or when picking, scrubbing, or switching modes needs the latest poses).
@@ -110,11 +111,20 @@ rendered frames to an MP4 through FFmpeg (which must be on PATH); **Stop recordi
 finalizes it. Recording excludes the GUI, advances time at 30 frames per second,
 and stops when the window is resized or a new scene is loaded.
 
-`resources/scenes/soma_walk.usda` contains a simple procedural test gait bound to
-SOMA's existing skeleton. `basic_walk.usda` references it and authors the character's
+`resources/scenes/soma_walk.usda` contains the authored Quaternius **Walk_Loop**,
+retargeted onto SOMA's existing skeleton. `basic_walk.usda` references it and authors the character's
 forward movement. `soma.usd` remains unchanged. This is not a Mixamo/motion-capture
-clip. `tools/create_test_walk.py` regenerates the clip with Python USD; Python is
+clip. Cadence matches the route's 0.65 m/s speed, with relaxed start/end poses and
+floor clearance calculated from the skinned mesh. Source motion, licenses and
+regeneration details are in [resources/animations/README.md](resources/animations/README.md).
+`tools/create_test_walk.py` regenerates the clip with Python USD; Python is
 not required to build or run the viewer.
+
+Select **Two characters** for two SOMA characters walking side by side. The demo
+is `resources/scenes/two_characters.usda`; it shares the walk clip, floor, box and
+physics scene from Basic walk. Play/pause, the timeline, mode changes and Reset
+apply to both characters together. Each character has its own 23 capsules and 22
+joints, and the opening camera frames both.
 
 The viewer owns the fixed-step clock, USD sampling, forward kinematics and CPU
 linear skinning. FBIK receives evaluated character-space bone poses and maps them
@@ -126,33 +136,60 @@ must be disabled).
 
 ## Character modes
 
-The **Mode** selector in **Scene** applies to all characters. **Follow** keeps bodies
-kinematic and driven by animation. **Ragdoll** releases the current pose as dynamic
+The **Mode** selector in **Scene** applies to all characters. Newly loaded scenes use **Follow** by default.
+**Kinematic** keeps bodies kinematic and driven exactly by animation. **Follow** uses dynamic bodies with damped
+position and orientation springs toward the sampled animation. Contacts can deflect
+the bones, and their simulated poses drive the visible skin. Character gravity is
+disabled in Follow; scene props keep their normal gravity. **Ragdoll** releases the current pose as dynamic
 bodies with zero initial velocities and holds animation/root motion. **Quasi static** also
 keeps bodies dynamic, but disables their gravity and clears linear and angular velocities
 before and after each fixed simulation step. Contacts, joint limits, and dragging can still
 correct positions; bodies retain no momentum between steps. Scene props keep their normal
 physics. This is a quasi static approximation, not an equilibrium solver. Physics updates
 the skeleton and visible skin after every step. Select a mode while paused or playing;
-selecting a mode alone does not start simulation. Returning to Follow snaps to the held
+selecting a mode alone does not start simulation. Returning to Kinematic snaps to the held
 animation pose. **Reset** restores the initial scene and time while retaining the mode.
 
 Limited joints connect each body to its nearest ancestor with a body, anchored at
 the child bone's skeleton base. Knees and elbows use revolute hinges; other connections
 use D6 ball joints with locked translation, limited twist, and circular swing cones.
-Root bodies are unanchored. SOMA has 23 bodies and 22 joints: four hinges and 18 ball
-joints. Joints are disabled in Follow and enabled in Ragdoll and Quasi static. Bone collisions
+Root bodies have no skeletal attachment to the world. SOMA has 23 bodies and 22 joints: four hinges and 18 ball
+joints. Skeletal joints are disabled in Kinematic and enabled in Follow, Ragdoll and Quasi static. Bone collisions
 exclude connected bodies and pairs whose padded rest-pose boxes overlap within a character.
 Other bone pairs, different characters, and the environment can collide. Shift-drag works on dynamic bone bodies as well as scene objects.
 
 `fbik::Module::init(stage, ordinal, minSkinWeight, jointDamping)` builds the generated layer.
 `setMode(mode, ordinal)` publishes a dedicated control ordinal that the physics wrapper
-consumes through `applyControlChanges`. `updateTargets(poses)` supplies Follow targets.
+consumes through `applyControlChanges`. `updateTargets(poses)` supplies animation targets for Kinematic or Follow.
 After a dynamic step, `readPoses(referencePoses, ordinal)` returns the existing `Pose`
-type for skinning. Reference poses are captured at release; bones without bodies retain
+type for skinning. Reference poses track animation in Follow and are captured at release in Ragdoll/Quasi static; bones without bodies retain
 their local relationship to their simulated ancestors. Fingers, eyes, jaw, and other
 collapsed descendants keep their reference local joint angles while following the hand
 or head body. FBIK does not advance physics or sample animation, and simulation output is never submitted as control input.
+
+### Follow animation drives
+
+Each bone has an additional world-to-body D6 joint with all six axes free. Native
+PhysX acceleration drives apply linear springs and a quaternion SLERP orientation
+spring; skeletal attachments, angular limits and contacts are solved in the same
+physics step. This is force-based tracking, not a blend or a body-transform override.
+All bones, including the root and feet, can yield; there is no hard foot pinning or
+balance controller. Incompatible animation, limits and contacts can leave tracking error.
+
+**Stiffness** controls how strongly animation is held; **Damping** reduces oscillation.
+Defaults are 400 per second squared and 40 per second, shared by translation and
+rotation. Acceleration drives account for mass/inertia when applying the gains;
+the bodies retain finite mass for two-way interaction with scene objects.
+Sampled linear/angular target velocities reduce playback lag. Pausing animation
+holds its target while physics and recovery continue. Pausing simulation freezes
+recovery. Seeking or looping replaces the target without injecting a discontinuous
+target velocity; the bodies approach it through simulation rather than teleporting.
+
+`PhysicsSimulation::setFollowTargets()` caches world-space goals without writing
+body transforms. `setFollowSettings()` changes the gains. Native joints are reacquired
+and configured each tick so mouse-joint population changes cannot discard the goals.
+Selecting Follow preserves the current body pose; selecting Ragdoll or Quasi static
+disables all animation drives. Reset rebuilds the initial pose while retaining the mode.
 
 ## Joint frames and angular limits
 
@@ -199,18 +236,17 @@ USD's per-axis swing bounds alone form a pyramid. It reapplies cones after mode 
 population changes and reacquires native pointers. Enabled joints are realized with a
 minimal initialization step when necessary; all starting body poses and velocities
 are restored afterward to avoid startup impulses. Custom stage population must include
-`fbik:swingLimit` for this integration. Limits are active in Ragdoll and Quasi static; Follow remains
+`fbik:swingLimit` and `fbik:followBody` for this integration. Limits are active in Follow, Ragdoll and Quasi static; Kinematic remains
 kinematic and unconstrained.
 
-All generated joints have angular damping through acceleration-mode
+All generated skeletal joints have angular damping through acceleration-mode
 `PhysicsDriveAPI` drives: the hinge axis for knees/elbows and all three angular
 axes for ball joints. Stiffness and target velocity are zero, so damping resists
 relative rotation while leaving a stationary joint free to hold any permitted pose.
 The `jointDamping` initialization parameter defaults to **5 per second**; set it
 to zero to disable damping. Acceleration mode accounts for body inertia, making the
 setting consistent across different bone sizes. The generated USD converts this
-rate to the importer's degree-based angular gains. These are passive dampers;
-pose-targeting animation drives are not implemented yet.
+rate to the importer's degree-based angular gains. These passive dampers remain separate from Follow animation drives.
 
 ## Character colliders
 
@@ -273,8 +309,8 @@ for both reasons. Rest-pose exclusions remain fixed; animation-pose sampling and
 
 This first version supports classic linear skinning, including joint remapping
 and constant/indexed weight primvars. Blend shapes and dual-quaternion skinning
-are not supported yet. Shapes retain their fitted geometry; in Follow mode they follow animation rigidly.
-Animation drives and collision-driven animation tracking follow later.
+are not supported yet. Shapes retain their fitted geometry; in Kinematic mode they follow animation rigidly.
+Follow mode retains these shapes while allowing physics to deflect their poses.
 
 ## Verification
 
@@ -289,6 +325,12 @@ build.bat -DVIEWER_TEST_RTX=ON
 ctest --test-dir build -C Release --output-on-failure
 ```
 
+Run the same viewer workflow with the two-character demo using:
+
+```bat
+build\Release\viewer_smoke.exe . --two-characters
+```
+
 The GPU test checks USD loading, rendered output, resize, failed-load recovery,
 reload, visible simulation motion/reset, timeline seeking/looping, character framing,
 and the ImGui/OpenGL backend. Movie recorder tests exercise MP4 output and encoder failures. It needs a working GPU session.
@@ -296,13 +338,13 @@ The CPU physics test verifies gravity, ground contact, child transforms, exact
 reset, repeatable trajectories, ray picking, dragging, collision resistance, and release. The small
 cube under `tests/data` is a test fixture, not a startup demo. The FBIK test covers
 multiple characters and skeletons, skin bindings, fitted and fallback capsules,
-rotated/scaled capsule bounds, zero-length spheres, sparse inputs, shape switching, leaf omission,
+rotated/scaled capsule bounds, zero-length spheres, sparse inputs, leaf omission,
 capsule overlap (including spheres and overlapping bounds), rest-versus-initial pose filters, native self/cross-character contacts, and joint damping without pose springs,
 hand/head subtree aggregation, helper-aware name detection, preserved descendant angles,
 Y/Z-up character frames, bent and straight hinge calibration, signed limits, circular
 swing versus pyramidal bounds, actual ragdoll angular limits, and reset repeatability,
 repeat initialization, character transforms, kinematic target tracking, skin deformation,
-physical cube displacement, repeatable animation/reset, ragdoll/quasi static transitions, gravity and momentum clearing, dragging, joint attachment,
+physical cube displacement, repeatable animation/reset, Follow tracking and recovery, stiffness/damping response, dynamic impact, mode transitions, gravity and momentum clearing, dragging, joint attachment,
 collision filtering, omitted-bone reconstruction, and ragdoll skinning. The RTX test also checks
 visible cube displacement during the walk.
 

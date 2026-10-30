@@ -189,10 +189,10 @@ struct Module::Impl
     std::vector<Body> bodies;
     std::vector<CollisionExclusion> exclusions;
     st::Query poseQuery;
-    std::vector<std::string> joints;
+    std::vector<std::string> joints, followJoints;
     std::map<std::string,std::vector<int>> parents;
     std::map<std::string,CollisionTopology> collisionTopologies;
-    Mode mode=Mode::Follow;
+    Mode mode=Mode::Kinematic;
     std::map<std::string,const Pose*> poseLookup(const std::vector<Pose> &poses) const
     {
         std::map<std::string,const Pose*> lookup;
@@ -229,9 +229,10 @@ InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, f
     impl->bodies.clear();
     impl->exclusions.clear();
     impl->joints.clear();
+    impl->followJoints.clear();
     impl->parents.clear();
     impl->collisionTopologies.clear();
-    impl->mode=Mode::Follow;
+    impl->mode=Mode::Kinematic;
     const auto data=st::read(scene,ordinal,attributes);
     InitResult result;
     std::map<std::string,std::vector<Skeleton>> characters;
@@ -376,6 +377,20 @@ InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, f
                 vector(usd,-extent);usd << ',';vector(usd,extent);
                 usd << "]\nuniform token[] xformOpOrder = [\"xformOp:translate\",\"xformOp:orient\"]\n";
                 usd << "}\n";
+                // A world-space spring target, separate from the skeletal attachment.
+                // Native D6 drives are configured by the physics wrapper when Follow is active.
+                const auto driveName="Follow_"+std::to_string(j);
+                const auto worldBody=rootWorld*Matrix(axes,center);
+                const Quat worldRotation(Mat33(worldBody.A.column0.normalized(),worldBody.A.column1.normalized(),worldBody.A.column2.normalized()));
+                impl->followJoints.push_back(skeletonRoot+"/"+driveName);
+                usd << "def PhysicsJoint " << quote(driveName)
+                    << " (prepend apiSchemas = [\"PhysicsDriveAPI:transX\",\"PhysicsDriveAPI:transY\",\"PhysicsDriveAPI:transZ\"])\n{\n"
+                    << "custom rel fbik:followBody = <" << bodyPath << ">\n"
+                    << "rel physics:body1 = <" << bodyPath << ">\n"
+                    << "point3f physics:localPos0 = ";
+                vector(usd,worldBody.b);
+                usd << "\nquatf physics:localRot0 = (" << worldRotation.w << ',' << worldRotation.x << ',' << worldRotation.y << ',' << worldRotation.z << ")\n"
+                    << "bool physics:jointEnabled = false\nbool physics:excludeFromArticulation = true\n}\n";
             }
             for (const auto &[j,index] : bodyIndices)
             {
@@ -473,7 +488,7 @@ Mode Module::mode() const { return impl->mode; }
 void Module::setMode(Mode mode, ovstage_ordinal_t &ordinal)
 {
     require(impl->stage!=nullptr,"setMode requires init.");
-    require(mode==Mode::Follow || mode==Mode::Ragdoll || mode==Mode::QuasiStatic,"Invalid character mode.");
+    require(usesAnimation(mode) || mode==Mode::Ragdoll || mode==Mode::QuasiStatic,"Invalid character mode.");
     if (mode==impl->mode) return;
     auto *s=impl->stage;
     std::vector<ovstage_query_handle_t> queries;
@@ -490,6 +505,7 @@ void Module::setMode(Mode mode, ovstage_ordinal_t &ordinal)
     {
         for (const auto &body:impl->bodies) query(body.path);
         for (const auto &joint:impl->joints) query(joint);
+        for (const auto &joint:impl->followJoints) query(joint);
         ++ordinal;writing=true;
         const auto write=[&](size_t i,const char *name,void *value,DLDataType dtype) {
             int64_t shape=1;DLTensor tensor{};tensor.data=value;tensor.device={kDLCPU,0};
@@ -498,11 +514,12 @@ void Module::setMode(Mode mode, ovstage_ordinal_t &ordinal)
             ovx_string_or_token_t attribute{};attribute.string=st::str(name);
             st::wait(s,ovstage_write_attribute(s,queries[i],attribute,ordinal,data,OVSTAGE_PRIM_MODE_UPSERT));
         };
-        uint8_t kinematic=mode==Mode::Follow,enabled=mode!=Mode::Follow,quasiStatic=mode==Mode::QuasiStatic,asleep=0;
+        uint8_t kinematic=mode==Mode::Kinematic,enabled=mode!=Mode::Kinematic,quasiStatic=mode==Mode::QuasiStatic,asleep=0;
+        uint8_t follow=mode==Mode::Follow,disableGravity=quasiStatic || follow;
         float zero[3]={0,0,0};
         for (size_t i=0;i<impl->bodies.size();++i) {
             write(i,"physics:kinematicEnabled",&kinematic,{kDLBool,8,1});
-            write(i,"physxRigidBody:disableGravity",&quasiStatic,{kDLBool,8,1});
+            write(i,"physxRigidBody:disableGravity",&disableGravity,{kDLBool,8,1});
             write(i,"fbik:quasiStatic",&quasiStatic,{kDLBool,8,1});
             write(i,"physics:velocity",zero,{kDLFloat,32,3});
             write(i,"physics:angularVelocity",zero,{kDLFloat,32,3});
@@ -510,6 +527,8 @@ void Module::setMode(Mode mode, ovstage_ordinal_t &ordinal)
         }
         for (size_t i=0;i<impl->joints.size();++i)
             write(impl->bodies.size()+i,"physics:jointEnabled",&enabled,{kDLBool,8,1});
+        for (size_t i=0;i<impl->followJoints.size();++i)
+            write(impl->bodies.size()+impl->joints.size()+i,"physics:jointEnabled",&follow,{kDLBool,8,1});
         st::seal(s,ordinal);writing=false;
     }
     catch (...) {

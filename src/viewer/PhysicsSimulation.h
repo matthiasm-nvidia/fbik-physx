@@ -24,6 +24,9 @@ class PhysicsSimulation
     PhysicsSimulation(const PhysicsSimulation &) = delete;
     PhysicsSimulation &operator=(const PhysicsSimulation &) = delete;
     void setKinematicTargets(const std::vector<fbik::BodyTarget> &targets, ovstage_ordinal_t &ordinal);
+    // Updates spring goals only; never writes simulated body transforms.
+    void setFollowTargets(const std::vector<fbik::BodyTarget> &targets, bool discontinuity = false);
+    void setFollowSettings(const fbik::FollowSettings &settings);
     // Consume only a dedicated, sealed input ordinal (e.g. Module::setMode).
     void applyControlChanges(ovstage_ordinal_t ordinal);
     // A viewer may defer output across catch-up ticks, then publish once before rendering/control changes.

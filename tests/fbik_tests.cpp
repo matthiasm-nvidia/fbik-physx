@@ -151,7 +151,7 @@ struct Scene
              "points", "skel:skeleton", "skel:animationSource", "skel:joints", "primvars:skel:geomBindTransform",
              "primvars:skel:jointIndices", "primvars:skel:jointWeights", "primvars:skel:jointIndices:indices",
              "primvars:skel:jointWeights:indices", "primvars:skel:skinningMethod", "skel:blendShapeTargets",
-             "fbik:joint", "fbik:skeleton", "fbik:swingLimit", "fbik:quasiStatic"}) properties.push_back(st::str(name));
+             "fbik:joint", "fbik:skeleton", "fbik:swingLimit", "fbik:quasiStatic", "fbik:followBody"}) properties.push_back(st::str(name));
         selector.property_predicate=ovstage_population_property_predicate_has_name(properties.data(), properties.size());
         const ovx_string_t metadata[]={st::str("interpolation"),st::str("elementSize")};
         selector.property_metadata_paths=metadata;selector.property_metadata_path_count=2;
@@ -435,7 +435,7 @@ void testSomaJointSetup(const std::filesystem::path &root)
         "limit:rotX:physics:low","limit:rotX:physics:high","fbik:swingLimit"});
     size_t knees=0,internal=0,mobile=0;
     for (const auto &[path,prim]:state) {
-        if(sk::get(prim,"physics:body1").paths.empty()) continue;
+        if(sk::get(prim,"physics:body0").paths.empty() || sk::get(prim,"physics:body1").paths.empty()) continue;
         const auto &childPath=prim.at("physics:body1").paths[0];
         const auto &joint=state.at(childPath).at("fbik:joint").token;
         const auto name=fbik::joints::boneName(joint);
@@ -482,7 +482,7 @@ void testDirectRagdollStart(const std::filesystem::path &root)
     module.setMode(fbik::Mode::Ragdoll,scene.ordinal);
     std::vector<fbik::Pose> previous;
     for (int run=0;run<2;++run) {
-        // No preceding Follow step: enabled native joints need initialization.
+        // No preceding Kinematic step: enabled native joints need initialization.
         viewer::PhysicsSimulation physics(scene.stage,scene.ordinal);
         physics.step(scene.ordinal);
         const auto poses=module.readPoses(reference,scene.ordinal);
@@ -583,7 +583,7 @@ void testQuasiStatic(const std::filesystem::path &root)
         checkMode(true,false);
         for(int frame=0;frame<30;++frame) physics.step(scene.ordinal);
         checkPose(falling);
-        module.setMode(fbik::Mode::Follow,scene.ordinal);physics.applyControlChanges(scene.ordinal);
+        module.setMode(fbik::Mode::Kinematic,scene.ordinal);physics.applyControlChanges(scene.ordinal);
         checkMode(false,true);
         physics.setKinematicTargets(targets,scene.ordinal);physics.step(scene.ordinal);
         checkPose(reference);
@@ -694,19 +694,19 @@ void testRagdoll(const std::filesystem::path &root)
             const auto &m=state.at(t.path).at("omni:fabric:worldMatrix").numbers;
             require(m[13]>.05 && m[13]<2,"Ragdoll failed to settle on the environment");
         }
-        module.setMode(fbik::Mode::Follow,scene.ordinal);
+        module.setMode(fbik::Mode::Kinematic,scene.ordinal);
         physics.applyControlChanges(scene.ordinal);
         physics.setKinematicTargets(targets,scene.ordinal);
         for(int i=0;i<4;++i) physics.step(scene.ordinal);
         const auto restored=module.readPoses(reference,scene.ordinal);
         for(size_t i=0;i<restored.size();++i) for(size_t j=0;j<restored[i].bones.size();++j)
             for(int k=0;k<16;++k) require(std::abs(restored[i].bones[j][k]-reference[i].bones[j][k])<.001,
-                                          "Returning to Follow failed to restore/hold targets");
+                                          "Returning to Kinematic failed to restore/hold targets");
     }
     physics.stop(scene.ordinal);
     module.setMode(fbik::Mode::Ragdoll,scene.ordinal);
     const auto repeat=module.init(scene.stage,scene.ordinal);
-    require(module.mode()==fbik::Mode::Follow && repeat.joints==stats.joints,"Reinit did not reset mode and joints");
+    require(module.mode()==fbik::Mode::Kinematic && repeat.joints==stats.joints,"Reinit did not reset mode and joints");
     std::cout << "Ragdoll transitions, joint anchors, skipped bones, collision filtering and floor contact passed.\n";
 }
 void testCollapsedBones(const std::filesystem::path &root)
@@ -806,6 +806,229 @@ void testCollapsedBones(const std::filesystem::path &root)
             repeat.capsules==stats.capsules,"Reinit changed collapsed topology");
     std::cout << "Hand/head capsule aggregation, name fallback, helpers and preserved descendant angles passed.\n";
 }
+void testFollow(const std::filesystem::path &root)
+{
+    namespace sk=viewer::skeleton;
+    using namespace MeshTools;
+    Scene scene;scene.load(root/"tests/data/follow.usda");
+    fbik::Module module;module.init(scene.stage,scene.ordinal);
+    const auto reference=viewer::sampleAnimation(scene.stage,scene.ordinal,0,module.characters());
+    const auto initial=module.updateTargets(reference);
+    require(initial.size()==1,"Follow fixture must have one capsule");
+    module.setMode(fbik::Mode::Follow,scene.ordinal);
+    viewer::PhysicsSimulation physics(scene.stage,scene.ordinal);
+    physics.setFollowTargets(initial,true);
+    const auto pose=[&](const std::string &path) {
+        return sk::world(st::read(scene.stage,scene.ordinal,{"omni:fabric:worldMatrix"}).at(path));
+    };
+    const auto body=[&] { return pose(initial[0].path); };
+    const auto step=[&](int count) { for(int i=0;i<count;++i) physics.step(scene.ordinal); };
+    step(30);
+    const auto rest=sk::unpacked(initial[0].world);
+    require((body().b-rest.b).magnitude()<.001,"Follow sagged under gravity or moved a held target");
+    // Feed-forward targets must track translation and rotation, with no direct pose writes.
+    auto targets=initial;
+    for (int i=1;i<=60;++i) {
+        const sk::Matrix target(Mat33(Quat(.4f*i/60,Vec3(0,0,1)))*rest.A,rest.b+Vec3(.3f*i/60,0,0));
+        targets[0].world=sk::packed(target);
+        physics.setFollowTargets(targets);
+        if(i==1) require((body().b-rest.b).magnitude()<1e-6,"Follow target teleported the body");
+        physics.step(scene.ordinal);
+    }
+    auto desired=sk::unpacked(targets[0].world);
+    std::cout << "Follow moving target error: " << (body().b-desired.b).magnitude() << " m\n";
+    require((body().b-desired.b).magnitude()<.02 && (body().A.column0-desired.A.column0).magnitude()<.03,
+            "Follow failed to track a moving/rotating target");
+    physics.setFollowTargets(initial,true);step(90);
+    require((body().b-rest.b).magnitude()<.001 && (body().A.column0-rest.A.column0).magnitude()<.001,
+            "Follow failed to recover a held position/orientation");
+    // A static wall must win over an impossible animation position.
+    targets=initial;targets[0].world[12]=1.2;
+    physics.setFollowTargets(targets,true);step(120);
+    std::cout << "Follow wall position: " << body().b.x << '\n';
+    require(body().b.x>.65 && body().b.x<.82,"Follow ignored static contact or could not approach the wall");
+    physics.setFollowTargets(initial,true);step(120);
+    require((body().b-rest.b).magnitude()<.002,"Follow did not recover after clearing an obstacle");
+    float undampedOvershoot=0;
+    for(const float damping:{0.f,40.f}) {
+        physics.setFollowSettings({400,damping});
+        targets=initial;targets[0].world[12]=-.3;
+        physics.setFollowTargets(targets,true);
+        float overshoot=0;
+        for(int i=0;i<60;++i) { step(1);overshoot=std::max(overshoot,-body().b.x-.3f); }
+        if(damping==0) { undampedOvershoot=overshoot;require(overshoot>.03,"Undamped spring response was not exercised"); }
+        else require(overshoot<undampedOvershoot*.2f,"Damping did not reduce oscillation");
+        physics.setFollowSettings({});physics.setFollowTargets(initial,true);step(120);
+    }
+    // The same sustained mouse load should deform softer animation drives more.
+    float soft=0;
+    for(const float stiffness:{100.f,1600.f}) {
+        physics.setFollowSettings({stiffness,2*std::sqrt(stiffness)});
+        require(physics.beginDrag({0,2.5f,3},{0,0,-1},scene.ordinal),"Follow body could not be dragged");
+        physics.moveDrag({.6f,2.5f,3},{0,0,-1},scene.ordinal);step(120);
+        const float displacement=body().b.x;
+        std::cout << "Follow stiffness " << stiffness << ": deflection=" << displacement << '\n';
+        if(stiffness==100) { soft=displacement;require(soft>.2,"Soft follow did not yield to sustained load"); }
+        else require(displacement>0 && displacement<soft*.6f,"Stiffness did not reduce sustained deformation");
+        physics.endDrag(scene.ordinal);step(120);
+        require((body().b-rest.b).magnitude()<.003,"Follow failed to recover after releasing a drag");
+    }
+    physics.setFollowSettings({});
+    // A dynamic object must displace the character and receive a response itself.
+    st::Query box;box.init(scene.stage,{"/World/Box"});
+    const std::vector<fbik::Matrix4> boxPoses={sk::packed(sk::Matrix(Mat33(Identity),Vec3(-.2f,2.5f,0)))};
+    box.writeTransforms(++scene.ordinal,boxPoses,&boxPoses);
+    st::seal(scene.stage,scene.ordinal);physics.applyControlChanges(scene.ordinal);
+    step(1);
+    std::cout << "Follow impact: body=" << body().b.x << ", box=" << pose("/World/Box").b.x << '\n';
+    require(body().b.x>.005 && pose("/World/Box").b.x<-.205,"Dynamic contact did not move both bodies");
+    step(120);
+    require((body().b-rest.b).magnitude()<.01,"Follow failed to recover after a dynamic impact");
+    // Ragdoll releases the actual pose and disables all animation springs.
+    const auto release=body();
+    module.setMode(fbik::Mode::Ragdoll,scene.ordinal);physics.applyControlChanges(scene.ordinal);
+    require((body().b-release.b).magnitude()<1e-6,"Ragdoll entry snapped the followed pose");
+    step(30);
+    require(body().b.y<release.b.y-.8,"Follow drive or disabled gravity leaked into ragdoll");
+    module.setMode(fbik::Mode::Follow,scene.ordinal);physics.applyControlChanges(scene.ordinal);
+    physics.setFollowTargets(initial,true);step(120);
+    require((body().b-rest.b).magnitude()<.01,"Re-entering Follow failed to recover from ragdoll");
+    module.setMode(fbik::Mode::Kinematic,scene.ordinal);physics.applyControlChanges(scene.ordinal);
+    physics.setKinematicTargets(initial,scene.ordinal);step(1);
+    require((body().b-rest.b).magnitude()<.001,"Kinematic mode failed after Follow");
+    physics.stop(scene.ordinal);
+    std::cout << "Follow tracking, rotation, contact, recovery, stiffness, dragging and mode transitions passed.\n";
+}
+
+void testFollowHierarchy(const std::filesystem::path &root)
+{
+    namespace sk=viewer::skeleton;
+    using namespace MeshTools;
+    Scene scene;scene.load(root/"tests/data/ragdoll.usda");
+    fbik::Module module;module.init(scene.stage,scene.ordinal);
+    const auto reference=viewer::sampleAnimation(scene.stage,scene.ordinal,0,module.characters());
+    module.setMode(fbik::Mode::Follow,scene.ordinal);
+    for(int run=0;run<2;++run) {
+        viewer::PhysicsSimulation physics(scene.stage,scene.ordinal);
+        physics.setFollowTargets(module.updateTargets(reference),true);
+        auto desired=reference;
+        for(int frame=1;frame<=90;++frame) {
+            desired=reference;
+            const sk::Matrix motion(Mat33(Quat(.3f*frame/90,Vec3(0,1,0))),Vec3(0,.4f*frame/90,0));
+            for(auto &p:desired) p.characterWorld=sk::packed(motion*sk::unpacked(p.characterWorld));
+            physics.setFollowTargets(module.updateTargets(desired));
+            physics.step(scene.ordinal);
+        }
+        for(int frame=0;frame<60;++frame) physics.step(scene.ordinal);
+        const auto actual=module.readPoses(desired,scene.ordinal);
+        for(size_t c=0;c<actual.size();++c) for(size_t j=0;j<actual[c].bones.size();++j)
+            require((sk::unpacked(actual[c].bones[j]).b-sk::unpacked(desired[c].bones[j]).b).magnitude()<.01,
+                    "Follow hierarchy lost attachments, character transforms or omitted bones");
+        physics.stop(scene.ordinal);
+    }
+    std::cout << "Follow scaled/rotated characters, attachment tracking, omitted bones and restart passed.\n";
+}
+
+void testWalkAnimation(const std::filesystem::path &root)
+{
+    namespace sk=viewer::skeleton;
+    using namespace MeshTools;
+    Scene scene;scene.load(root/"resources/scenes/basic_walk.usda");
+    fbik::Module module;module.init(scene.stage,scene.ordinal);
+    viewer::AnimationPlayer animation;animation.init(scene.stage,scene.ordinal,module.characters());
+    const auto &names=module.characters().front().joints;
+    const auto index=[&](const std::string &leaf) {
+        for(size_t i=0;i<names.size();++i)
+            if(names[i].substr(names[i].find_last_of('/')+1)==leaf) return i;
+        throw std::runtime_error("Missing walk joint: "+leaf);
+    };
+    const size_t toes[]={index("LeftToeBase"),index("RightToeBase")};
+    const size_t legs[]={index("LeftLeg"),index("RightLeg")};
+    const size_t knees[]={index("LeftShin"),index("RightShin")};
+    const size_t feet[]={index("LeftFoot"),index("RightFoot")};
+    const auto initial=animation.sample(scene.ordinal,0).front();
+    const auto held=animation.sample(scene.ordinal,1).front();
+    require(initial.bones==held.bones,"Held start pose is not stationary");
+    std::vector<float> stanceSpeeds;
+    Vec3 previous[2];float maxKneeBend=0,maxToeStep=0;
+    for(int frame=110;frame<=380;++frame) {
+        const auto pose=animation.sample(scene.ordinal,frame/60.).front();
+        const auto world=sk::unpacked(pose.characterWorld);
+        const auto point=[&](size_t joint) { return world.transform(sk::unpacked(pose.bones[joint]).b); };
+        for(int side=0;side<2;++side) {
+            const auto toe=point(toes[side]);
+            if(frame>110) {
+                auto delta=toe-previous[side];
+                maxToeStep=std::max(maxToeStep,delta.magnitude());
+                if(std::max(toe.y,previous[side].y)<.055f) {
+                    delta.y=0;stanceSpeeds.push_back(delta.magnitude()*60);
+                }
+            }
+            previous[side]=toe;
+            const auto upper=(point(knees[side])-point(legs[side])).normalized();
+            const auto lower=(point(feet[side])-point(knees[side])).normalized();
+            maxKneeBend=std::max(maxKneeBend,std::acos(std::clamp(upper.dot(lower),-1.f,1.f))*180/Pi);
+        }
+    }
+    require(stanceSpeeds.size()>100,"Walk lacks sustained stance-foot contacts");
+    std::sort(stanceSpeeds.begin(),stanceSpeeds.end());
+    const float median=stanceSpeeds[stanceSpeeds.size()/2];
+    std::cout << "Authored walk: median stance slip=" << median << " m/s, peak knee bend=" << maxKneeBend << " degrees\n";
+    require(median<.12f,"Walk cadence does not match scene travel: stance feet slide");
+    require(maxKneeBend>50 && maxKneeBend<100 && maxToeStep<.1f,"Walk lost its swing phase or has a pose discontinuity");
+    const auto stopped=animation.sample(scene.ordinal,7).front();
+    const auto end=animation.sample(scene.ordinal,8).front();
+    require(stopped.bones==end.bones,"Held end pose is not stationary");
+}
+
+void testFollowWalk(const std::filesystem::path &root)
+{
+    namespace sk=viewer::skeleton;
+    Scene scene;scene.load(root/"resources/scenes/basic_walk.usda");
+    fbik::Module module;module.init(scene.stage,scene.ordinal);
+    viewer::AnimationPlayer animation;animation.init(scene.stage,scene.ordinal,module.characters());
+    auto reference=animation.sample(scene.ordinal,0);
+    module.setMode(fbik::Mode::Follow,scene.ordinal);
+    viewer::PhysicsSimulation physics(scene.stage,scene.ordinal);
+    physics.setFollowTargets(module.updateTargets(reference),true);
+    float worstAttachment=0,meanTracking=0;
+    for(int frame=1;frame<=240;++frame) {
+        reference=animation.sample(scene.ordinal,frame/60.);
+        const auto targets=module.updateTargets(reference);
+        physics.setFollowTargets(targets);physics.step(scene.ordinal);
+        const auto state=st::read(scene.stage,scene.ordinal,{"omni:fabric:worldMatrix",
+            "physics:body0","physics:body1","physics:localPos0","physics:localPos1"});
+        float error=0;
+        for(const auto &target:targets) {
+            const auto actual=sk::world(state.at(target.path));
+            const float distance=(actual.b-sk::unpacked(target.world).b).magnitude();
+            require(std::isfinite(distance),"Follow walk produced a nonfinite pose");
+            error+=distance;
+        }
+        meanTracking=std::max(meanTracking,error/float(targets.size()));
+        for(const auto &[path,prim]:state) if(!sk::get(prim,"physics:body0").paths.empty() &&
+                                               !sk::get(prim,"physics:body1").paths.empty()) {
+            const auto anchor=[&](const char *body,const char *local) {
+                const auto &p=prim.at(local).numbers;
+                return sk::world(state.at(prim.at(body).paths[0])).transform({float(p[0]),float(p[1]),float(p[2])});
+            };
+            worstAttachment=std::max(worstAttachment,(anchor("physics:body0","physics:localPos0")-
+                                                     anchor("physics:body1","physics:localPos1")).magnitude());
+        }
+    }
+    std::cout << "Follow walk: worst frame mean tracking=" << meanTracking << " m, attachment=" << worstAttachment << " m\n";
+    require(meanTracking<.2 && worstAttachment<.03,"Follow walk lost tracking or skeletal attachments");
+    const auto held=module.updateTargets(module.readPoses(reference,scene.ordinal));
+    reference=animation.sample(scene.ordinal,1);
+    physics.setFollowTargets(module.updateTargets(reference),true);
+    physics.publish(scene.ordinal); // No physics step: a seek must only change the goals.
+    const auto afterSeek=module.updateTargets(module.readPoses(reference,scene.ordinal));
+    for(size_t i=0;i<held.size();++i)
+        require((sk::unpacked(held[i].world).b-sk::unpacked(afterSeek[i].world).b).magnitude()<1e-4,
+                "Sampling an animated parent moved Follow bodies before simulation");
+    physics.stop(scene.ordinal);
+}
+
 int main(int argc,char **argv)
 {
     int code=0;bool initialized=false;
@@ -828,6 +1051,10 @@ int main(int argc,char **argv)
         testQuasiStatic(root);
         testCollapsedBones(root);
         testRagdoll(root);
+        testFollow(root);
+        testFollowHierarchy(root);
+        testWalkAnimation(root);
+        testFollowWalk(root);
         {
             Scene scene;scene.load(root/"tests/data/characters.usda");
             fbik::Module module;

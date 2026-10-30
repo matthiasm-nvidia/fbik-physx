@@ -40,6 +40,17 @@ bool flag(const stage::Prim &prim, const char *name)
     auto it = prim.find(name);
     return it != prim.end() && !it->second.numbers.empty() && it->second.numbers[0] != 0;
 }
+physx::PxTransform rigidPose(const Matrix &m)
+{
+    for (double v:m) if (!std::isfinite(v)) throw std::runtime_error("Invalid animation target.");
+    const physx::PxVec3 x{float(m[0]),float(m[1]),float(m[2])};
+    const physx::PxVec3 y{float(m[4]),float(m[5]),float(m[6])};
+    const physx::PxVec3 z{float(m[8]),float(m[9]),float(m[10])};
+    if (std::min({x.magnitudeSquared(),y.magnitudeSquared(),z.magnitudeSquared()})<1e-12f)
+        throw std::runtime_error("Degenerate animation target.");
+    return {physx::PxVec3(float(m[12]),float(m[13]),float(m[14])),
+            physx::PxQuat(physx::PxMat33(x.getNormalized(),y.getNormalized(),z.getNormalized())).getNormalized()};
+}
 Matrix multiply(const Matrix &a, const Matrix &b)
 {
     Matrix result{};
@@ -154,6 +165,13 @@ struct PhysicsSimulation::Impl
     std::set<std::string> kinematic;
     std::set<std::string> quasiStatic;
     std::map<std::string,float> swingCones;
+    struct FollowDrive {
+        std::string joint;
+        physx::PxTransform target{physx::PxIdentity}, previous{physx::PxIdentity};
+        bool enabled = false;
+    };
+    std::map<std::string,FollowDrive> followDrives;
+    fbik::FollowSettings followSettings;
     stage::Query targetsQuery, localsQuery, transformsQuery;
     std::vector<std::string> targetPaths;
     std::vector<Matrix> targetLocals, targetWorlds, localTransforms;
@@ -162,6 +180,58 @@ struct PhysicsSimulation::Impl
     bool hasJointLayer = false, activeDrag = false, stepped = false, pendingOutput = false;
     float dragDepth = 0;
     Vec3 target{0, 0, 0};
+    void refreshFollow(const viewer::stage::Snapshot &state)
+    {
+        for (auto &[body,drive]:followDrives) {
+            const bool enabled=flag(state.at(drive.joint),"physics:jointEnabled");
+            if (enabled && !drive.enabled) {
+                drive.target=rigidPose(matrix(state.at(body),"omni:fabric:worldMatrix"));
+                drive.previous=drive.target;
+            }
+            drive.enabled=enabled;
+        }
+    }
+    void prepareFollow(ovstage_ordinal_t ordinal)
+    {
+        // Even a one-bone character needs native output before a seek can change
+        // its animated parent transform without advancing the simulation.
+        if (!stepped && std::any_of(followDrives.begin(),followDrives.end(),
+                                   [](const auto &entry) { return entry.second.enabled; }))
+            realizeJoints(ordinal);
+    }
+    void driveAnimation(ovstage_ordinal_t ordinal)
+    {
+        for (auto &[path,drive]:followDrives) {
+            if (!drive.enabled) continue;
+            if (!stepped) realizeJoints(ordinal);
+            // Population edits (including mouse grabbing) can recreate native joints.
+            // Reapply settings and targets to the current joint before every tick.
+            void *pointer=nullptr;
+            check(ovphysx_get_physx_ptr(handle,{drive.joint.c_str(),drive.joint.size()},OVPHYSX_PHYSX_TYPE_JOINT,&pointer));
+            auto *joint=pointer ? static_cast<physx::PxJoint*>(pointer)->is<physx::PxD6Joint>() : nullptr;
+            if (!joint) throw std::runtime_error("Expected an animation D6 joint: "+drive.joint);
+            for (int axis=0;axis<physx::PxD6Axis::eCOUNT;++axis)
+                joint->setMotion(physx::PxD6Axis::Enum(axis),physx::PxD6Motion::eFREE);
+            joint->setLocalPose(physx::PxJointActorIndex::eACTOR0,physx::PxTransform(physx::PxIdentity));
+            joint->setLocalPose(physx::PxJointActorIndex::eACTOR1,physx::PxTransform(physx::PxIdentity));
+            const physx::PxD6JointDrive spring(followSettings.stiffness,followSettings.damping,PX_MAX_F32,true);
+            for (const auto axis:{physx::PxD6Drive::eX,physx::PxD6Drive::eY,physx::PxD6Drive::eZ})
+                joint->setDrive(axis,spring);
+            if (joint->getAngularDriveConfig()!=physx::PxD6AngularDriveConfig::eSLERP)
+                joint->setAngularDriveConfig(physx::PxD6AngularDriveConfig::eSLERP);
+            joint->setDrive(physx::PxD6Drive::eSLERP,spring);
+            // Feed forward sampled animation velocity to reduce tracking lag. Held
+            // animation naturally has zero target velocity on the next physics tick.
+            auto delta=drive.target.q*drive.previous.q.getConjugate();
+            if (delta.w<0) delta=-delta;
+            float angle=0;physx::PxVec3 axis(0);
+            delta.toRadiansAndUnitAxis(angle,axis);
+            joint->setDrivePosition(drive.target);
+            joint->setDriveVelocity((drive.target.p-drive.previous.p)/PhysicsSimulation::timeStep,
+                                    axis*(angle/PhysicsSimulation::timeStep));
+            drive.previous=drive.target;
+        }
+    }
     void realizeJoints(ovstage_ordinal_t ordinal)
     {
         // ovphysx requires a warmup to expose native joints. At 1 ns, existing
@@ -202,7 +272,7 @@ struct PhysicsSimulation::Impl
         if (swingCones.empty()) return;
         const auto state=viewer::stage::read(stage,ordinal,{"physics:jointEnabled"});
         for (const auto &[path,angle]:swingCones) {
-            // ovphysx does not instantiate disabled joints in Follow mode.
+            // ovphysx does not instantiate disabled joints in Kinematic mode.
             if (!state.count(path) || !flag(state.at(path),"physics:jointEnabled")) continue;
             if (!stepped) realizeJoints(ordinal);
             void *pointer=nullptr;
@@ -255,7 +325,14 @@ struct PhysicsSimulation::Impl
 
 PhysicsSimulation::PhysicsSimulation(ovstage_instance_t *s, ovstage_ordinal_t ordinal) : impl(std::make_unique<Impl>(s))
 {
-    const auto snapshot = stage::read(s, ordinal, {"omni:xform", "physics:rigidBodyEnabled", "physics:kinematicEnabled", "fbik:swingLimit", "fbik:quasiStatic"});
+    const auto snapshot = stage::read(s, ordinal, {"omni:xform", "omni:fabric:worldMatrix", "physics:rigidBodyEnabled",
+        "physics:kinematicEnabled", "fbik:swingLimit", "fbik:quasiStatic", "fbik:followBody", "physics:jointEnabled"});
+    for (const auto &[path,prim]:snapshot) if (const auto it=prim.find("fbik:followBody");it!=prim.end()) {
+        if (it->second.paths.size()!=1) throw std::runtime_error("Invalid follow joint: "+path);
+        Impl::FollowDrive drive;drive.joint=path;
+        impl->followDrives.emplace(it->second.paths[0],drive);
+    }
+    impl->refreshFollow(snapshot);
     for (const auto &[path,prim]:snapshot) if (const auto it=prim.find("fbik:swingLimit");it!=prim.end()) {
         const auto &values=it->second.numbers;
         if (values.size()!=1 || !std::isfinite(values[0]) || values[0]<=0 || values[0]>=180)
@@ -297,6 +374,7 @@ PhysicsSimulation::PhysicsSimulation(ovstage_instance_t *s, ovstage_ordinal_t or
     check(ovphysx_create_instance(&args, &impl->handle));
     check(ovphysx_attach_ovstage(impl->handle, s, ordinal));
     impl->configureCones(ordinal);
+    impl->prepareFollow(ordinal);
     impl->cache = std::make_unique<ovphysx::utils::OvStageOutputCache>();
 }
 PhysicsSimulation::~PhysicsSimulation() = default;
@@ -304,7 +382,10 @@ PhysicsSimulation::~PhysicsSimulation() = default;
 void PhysicsSimulation::applyControlChanges(ovstage_ordinal_t ordinal)
 {
     impl->drain(ordinal,true);
-    const auto snapshot=stage::read(impl->stage,ordinal,{"physics:kinematicEnabled","fbik:quasiStatic"});
+    const auto snapshot=stage::read(impl->stage,ordinal,{"physics:kinematicEnabled","fbik:quasiStatic",
+        "physics:jointEnabled","omni:fabric:worldMatrix"});
+    impl->refreshFollow(snapshot);
+    impl->prepareFollow(ordinal);
     impl->kinematic.clear();
     impl->quasiStatic.clear();
     for (const auto &[path,prim]:snapshot) {
@@ -338,8 +419,36 @@ void PhysicsSimulation::setKinematicTargets(const std::vector<fbik::BodyTarget> 
     impl->drain(ordinal); // CPU ovphysx converts transform edits to setKinematicTarget, not teleportation.
 }
 
+void PhysicsSimulation::setFollowTargets(const std::vector<fbik::BodyTarget> &targets, bool discontinuity)
+{
+    std::map<std::string,physx::PxTransform> poses;
+    for (const auto &target:targets) {
+        const auto it=impl->followDrives.find(target.path);
+        if (it==impl->followDrives.end() || !it->second.enabled)
+            throw std::runtime_error("Target is not a following body: "+target.path);
+        if (!poses.emplace(target.path,rigidPose(target.world)).second)
+            throw std::runtime_error("Duplicate follow target: "+target.path);
+    }
+    for (const auto &[path,pose]:poses) {
+        auto &drive=impl->followDrives.at(path);
+        drive.target=pose;
+        if (discontinuity) drive.previous=pose;
+    }
+    // Sampling animation can move the stage hierarchy above a dynamic body.
+    // Republish native poses before display, including seeks with no physics tick.
+    if (!poses.empty()) impl->pendingOutput=true;
+}
+void PhysicsSimulation::setFollowSettings(const fbik::FollowSettings &settings)
+{
+    if (!std::isfinite(settings.stiffness) || settings.stiffness<0 ||
+        !std::isfinite(settings.damping) || settings.damping<0)
+        throw std::runtime_error("Follow stiffness and damping must be finite and nonnegative.");
+    impl->followSettings=settings;
+}
+
 void PhysicsSimulation::step(ovstage_ordinal_t &ordinal, bool publishOutput)
 {
+    impl->driveAnimation(ordinal);
     const auto bodies=impl->quasiStaticBodies(ordinal);
     const auto clearVelocities=[&] {
         for (auto *body:bodies) {

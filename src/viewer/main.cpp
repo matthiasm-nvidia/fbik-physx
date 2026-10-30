@@ -259,9 +259,11 @@ int wmain(int argc, wchar_t **argv)
     const auto executableDirectory = std::filesystem::path(executablePath).parent_path();
     const std::string demoPaths[] = {
         (executableDirectory / "resources/scenes/basic_walk.usda").u8string(),
+        (executableDirectory / "resources/scenes/two_characters.usda").u8string(),
         (executableDirectory / "resources/scenes/falling_box.usda").u8string()};
-    const char *demoNames[] = {"Basic walk", "Falling box"};
+    const char *demoNames[] = {"Basic walk", "Two characters", "Falling box"};
     static_assert(std::size(demoPaths) == std::size(demoNames));
+    if (scenePath.empty()) scenePath = demoPaths[0];
     viewer::RecentFiles recent(executableDirectory / "../../.cache/recent-usd.txt");
 
     glfwSetErrorCallback([](int code, const char *message) { std::fprintf(stderr, "GLFW %d: %s\n", code, message); });
@@ -493,14 +495,28 @@ int wmain(int argc, wchar_t **argv)
                         if (hasCharacter)
                         {
                             int mode=static_cast<int>(rtx.characterMode());
+                            ImGui::AlignTextToFramePadding();
+                            ImGui::TextUnformatted("Mode");
+                            ImGui::SameLine();
                             ImGui::PushItemWidth(210 * 0.7f * scale);
-                            if (ImGui::Combo("Mode", &mode, "Follow\0Ragdoll\0Quasi static\0")) {
+                            if (ImGui::Combo("##Mode", &mode, "Kinematic\0Follow\0Ragdoll\0Quasi static\0")) {
                                 rtx.setCharacterMode(static_cast<fbik::Mode>(mode));
                                 v.animationPlaying=rtx.animating();
                             }
                             ImGui::PopItemWidth();
                         }
                         if (hasCharacter && rtx.characterMode()==fbik::Mode::Follow)
+                        {
+                            auto settings=rtx.followSettings();
+                            ImGui::PushItemWidth(210 * 0.7f * scale);
+                            bool changed=ImGui::SliderFloat("Stiffness", &settings.stiffness, 25, 1600, "%.0f");
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Animation pull strength. Lower values yield more to contacts.");
+                            changed=ImGui::SliderFloat("Damping", &settings.damping, 0, 100, "%.0f") || changed;
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reduces oscillation around the animation target.");
+                            ImGui::PopItemWidth();
+                            if (changed) rtx.setFollowSettings(settings);
+                        }
+                        if (hasCharacter && fbik::usesAnimation(rtx.characterMode()))
                         {
                             if (ImGui::Button(v.animationPlaying ? "Pause animation" : "Play animation"))
                             {
@@ -535,6 +551,7 @@ int wmain(int argc, wchar_t **argv)
                         ImGui::PopItemWidth();
                         if (hasCharacter)
                         {
+                            ImGui::Separator();
                             bool show = rtx.boneCollidersVisible();
                             if (ImGui::Checkbox("Show bone colliders", &show)) rtx.showBoneColliders(show);
                         }
@@ -580,8 +597,10 @@ int wmain(int argc, wchar_t **argv)
                         ImGui::Text("Connected: %zu joints", rtx.boneJointCount());
                         ImGui::Text("Excluded: %zu pairs", rtx.collisionExclusions().size());
                         if (ImGui::Button("Inspect exclusions")) v.showCollisionExclusions = true;
-                        ImGui::TextWrapped(rtx.characterMode()==fbik::Mode::Follow
+                        ImGui::TextWrapped(rtx.characterMode()==fbik::Mode::Kinematic
                             ? "Kinematic bone bodies follow the animation."
+                            : rtx.characterMode()==fbik::Mode::Follow
+                            ? "Dynamic bones follow animation with springs and yield to contacts. Gravity is off."
                             : rtx.characterMode()==fbik::Mode::QuasiStatic
                             ? "Gravity is off and momentum is cleared each step. Contacts and joint limits remain active."
                             : "Dynamic bone bodies drive the character. Animation is held.");
@@ -691,6 +710,7 @@ int wmain(int argc, wchar_t **argv)
                     stopRecording();
                     rtx.initialize(executableDirectory.u8string());
                     rtx.load(requested, width, height);
+                    if (rtx.characterJointCount()) rtx.setCharacterMode(fbik::Mode::Follow);
                     renderFailed = false;
                     v.playing = false;
                     v.animationPlaying = false;

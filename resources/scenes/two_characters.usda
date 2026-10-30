@@ -1,0 +1,48 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    kilogramsPerUnit = 1
+    upAxis = "Y"
+    startTimeCode = 0
+    endTimeCode = 480
+    timeCodesPerSecond = 60
+)
+
+# Reuse the first character, walk clip, ground, box and shared physics scene.
+def Xform "World" (
+    prepend references = @basic_walk.usda@</World>
+)
+{
+    over "Camera"
+    {
+        matrix4d xformOp:transform = ((0.74740932, 0.00000000, -0.66436384, 0.00000000), (-0.24600327, 0.92891861, -0.27675368, 0.00000000), (0.61713994, 0.37028396, 0.69428243, 0.00000000), (6.00000000, 4.60000000, 6.00000000, 1.00000000))
+    }
+
+    # A separate SkelRoot under this placement gives the second copy its own
+    # skinning, bone bodies and joints while both use the same animation clock.
+    def Xform "Character2"
+    {
+        double3 xformOp:translate = (2, 0, -1.5)
+        double3 xformOp:translate.timeSamples = {
+            0: (2, 0, -1.5),
+            75: (2, 0, -1.5),
+            405: (-1.575, 0, -1.5),
+            480: (-1.575, 0, -1.5),
+        }
+        float xformOp:rotateY = -90
+        double3 xformOp:scale = (0.01, 0.01, 0.01)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateY", "xformOp:scale"]
+
+        def "Soma" (
+            prepend references = @soma.usd@</OUTPUT>
+        )
+        {
+            over "c_skeleton_grp" {
+                over "Root" {
+                    rel skel:animationSource = </World/Walk>
+                }
+            }
+        }
+    }
+}

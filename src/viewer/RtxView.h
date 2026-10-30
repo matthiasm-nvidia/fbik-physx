@@ -30,6 +30,8 @@ class RtxView
     void setAnimationLoop(bool loop);
     void setCharacterMode(fbik::Mode mode);
     fbik::Mode characterMode() const;
+    fbik::FollowSettings followSettings() const;
+    void setFollowSettings(const fbik::FollowSettings &settings);
     size_t characterJointCount() const;
     Vec3 characterCenter() const;
     float characterRadius() const;

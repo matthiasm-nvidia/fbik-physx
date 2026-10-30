@@ -6,7 +6,7 @@ Build a full-body pose correction system for animated characters using ovphysx f
 
 Scene objects and character bones will participate in the same PhysX simulation. PhysX will handle their collision detection and physical interaction. The first implementation will use PhysX joints for the character's constraints and animation tracking. A custom IK solver will be considered only if this approach cannot provide sufficient stability or the desired behavior.
 
-Status: the standalone viewer and initial ovphysx integration are implemented. The falling-box USD verifies gravity and contact; Start/Stop runs and resets the simulation. Kinematic character bodies, USD animation playback, and viewer-side skinning are implemented. A procedural SOMA walk pushes the cube. Follow/ragdoll/quasi static mode switching, dynamic character bodies, limited knee/elbow hinges and ball joints, bone collision filtering, and physics-to-skin pose reconstruction are implemented. Animation drives and IK remain future work.
+Status: the standalone viewer and initial ovphysx integration are implemented. The falling-box USD verifies gravity and contact; Start/Stop runs and resets the simulation. Kinematic character bodies, USD animation playback, and viewer-side skinning are implemented. SOMA pushes the cube using the authored Quaternius walk retargeted from the original FBIK example. Kinematic/follow/ragdoll/quasi static mode switching, dynamic character bodies, limited knee/elbow hinges and ball joints, bone collision filtering, and physics-to-skin pose reconstruction are implemented. Native animation drives are implemented in Follow; custom IK remains future work.
 
 ## First step: minimal standalone viewer
 
@@ -44,7 +44,7 @@ Relevant components include:
 - Animation tracking, contact response, ragdoll behavior, and diagnostics.
 - Test scenes and recorded investigations of unstable contact behavior.
 
-The reference currently includes both a quasi-static rotation-based solver and a custom rigid-body simulation with compliant animation drives. This project will use that work to guide behavior and integration while assigning physics simulation to ovphysx.
+The reference includes a quasi-static rotation-based animation solver with decaying pose corrections and a separate custom rigid-body simulation. Its coupled animation drives are still proposed. This project uses the reference behavior to guide integration while assigning dynamics and compliant animation tracking to ovphysx.
 
 ## Intended architecture
 
@@ -110,9 +110,9 @@ Implemented with ovphysx 0.6.4, ovstage 0.2.1, and ovrtx 0.5.0. The shared ovsta
 
 The first pass is implemented behind `fbik::Module`: discover `SkelRoot` characters, fit capsules to skin vertices whose weight for that bone is strictly above 0.3, and fall back to hierarchy-based capsules when no vertices are available. Hand and head descendants are collapsed into their ancestor body while retaining the full visual skeleton. Other leaves have no collider unless they are a skinned terminal hand or head. A viewer checkbox displays the generated geometry. SOMA yields 23 capsules, 52 collapsed descendants, and two omitted leaves. Shapes are fitted in the initial evaluated pose and live in a replaceable in-memory USD layer. They now have kinematic rigid-body APIs and follow evaluated bone poses through fixed offsets.
 
-Ragdoll mode makes the bodies dynamic and enables limited joints anchored at the skeleton bone bases. Four SOMA knee/elbow connections are hinges; the other 18 use D6 ball joints with twist bounds and native circular swing cones. Rest-pose frames account for measured hinge bends, use head-to-feet separation to resolve Y/Z up despite rotated T-pose arm span, and use foot directions to resolve forward. Knee flexion is backward about character-right. Internal spherical joints have 5-degree swing and +/-5-degree twist; only head and non-arm-to-arm/non-leg-to-leg boundaries retain wider limits. Character bodies use 32 position and four velocity solver iterations for these tight limits. The frame rules and per-joint limit presets are documented in README.md. Root bodies remain unanchored. Angular acceleration drives damp each permitted rotational axis with zero stiffness and zero target velocity; the initialization damping rate defaults to 5 per second and can be set to zero. This reduces relative angular motion without pulling joints toward the rest pose. Self-collision filters exclude directly connected bodies and pairs with overlapping rest-pose capsules within each character; all other bone pairs, separate characters, and the environment can collide. Capsule overlap uses center-segment distance and the sum of radii, so bounding-box overlap alone does not exclude a pair. The viewer lists excluded pairs and their reasons under Info. Physics poses reconstruct the visible skeleton, retaining local poses for omitted bones. Follow remains kinematic. Quasi static keeps dynamic joints and contacts active while disabling character gravity and clearing linear/angular velocities before and after every step; scene props retain normal physics. Mode changes preserve the current release pose; returning to Follow snaps to the held animation pose. Next, add animation drives.
+Ragdoll mode makes the bodies dynamic and enables limited joints anchored at the skeleton bone bases. Four SOMA knee/elbow connections are hinges; the other 18 use D6 ball joints with twist bounds and native circular swing cones. Rest-pose frames account for measured hinge bends, use head-to-feet separation to resolve Y/Z up despite rotated T-pose arm span, and use foot directions to resolve forward. Knee flexion is backward about character-right. Internal spherical joints have 5-degree swing and +/-5-degree twist; only head and non-arm-to-arm/non-leg-to-leg boundaries retain wider limits. Character bodies use 32 position and four velocity solver iterations for these tight limits. The frame rules and per-joint limit presets are documented in README.md. Root bodies remain unanchored. Angular acceleration drives damp each permitted rotational axis with zero stiffness and zero target velocity; the initialization damping rate defaults to 5 per second and can be set to zero. This reduces relative angular motion without pulling joints toward the rest pose. Self-collision filters exclude directly connected bodies and pairs with overlapping rest-pose capsules within each character; all other bone pairs, separate characters, and the environment can collide. Capsule overlap uses center-segment distance and the sum of radii, so bounding-box overlap alone does not exclude a pair. The viewer lists excluded pairs and their reasons under Info. Physics poses reconstruct the visible skeleton, retaining local poses for omitted bones. Kinematic preserves exact animation targets. Follow uses dynamic bones and native D6 animation drives. Quasi static keeps dynamic joints and contacts active while disabling character gravity and clearing linear/angular velocities before and after every step; scene props retain normal physics. Mode changes preserve the current release pose; returning to Kinematic snaps to the held animation pose. Follow preserves the current pose and recovers toward the animation target.
 
-### 2a. Kinematic walking collision test � implemented
+### 2a. Kinematic walking collision test — implemented
 
 The viewer owns the playback clock and samples USD animation at each physics tick.
 It computes skeletal forward kinematics and updates mesh points, smooth vertex normals,
@@ -123,19 +123,35 @@ samples animation or steps the solver. The physics module submits a dedicated
 ovstage control ordinal before stepping; CPU ovphysx turns these edits into native
 kinematic targets. Bone dimensions and offsets are fixed after initialization. Cached ordered queries batch all body targets in one local/world write. Animation sampling caches static skeleton metadata; physics output, ragdoll pose reconstruction, and CPU skinning are deferred until a frame or a control operation needs them. Intermediate physics ticks do not publish to the stage, and output is never drained back as input. Query lifetimes are bounded by their owning stage.
 
-The `basic_walk.usda` sample references `soma_walk.usda`, a generated procedural gait, and separately
+The `basic_walk.usda` sample references `soma_walk.usda`, the CC0 Quaternius Walk_Loop retargeted onto SOMA, and separately
 authors character translation toward the box. Animation stays paused on load and
 reset until Play animation is clicked; that button also starts physics if needed.
 Pause animation holds the character pose while physics continues. Stop simulation restores the initial scene,
-skin, and animation time. The clip holds its final pose rather than looping root motion.
+skin, and animation time. The clip holds its final pose rather than looping root motion. The Two characters demo references the same scene and adds a second SOMA beside the first, sharing the animation clock and global simulation controls in one physics scene.
 Tests cover body target tracking, skin deformation/reset, cube displacement, repeatable
 restarts, and visible RTX motion. This is one-way kinematic contact: the cube responds,
-while the character continues following its animation. Dynamic bones and joints will
-provide collision-driven character response in the next milestone.
+while the character continues following its animation. Follow mode now provides dynamic collision response.
 
-### 3. Track animation with native joints
+### 3. Track animation with native joints — implemented
 
-Connect sampled animation targets to the available joint drives. Implement pose reconstruction and assess tracking error, attachment error, and recovery behavior in free space.
+Kinematic is the former rigid Follow mode. The new Follow mode makes every bone dynamic,
+enables skeletal attachments/limits, disables character gravity, and adds world-space
+D6 animation drives with free translation/rotation. Linear acceleration springs and
+quaternion SLERP springs track sampled body poses with finite mass/inertia; contacts
+can displace bones and the simulated skeleton drives skinning. Defaults are stiffness
+400/s² and damping 40/s, exposed in the viewer. All bones, including root and feet,
+can yield; hard foot pinning and balance control are outside this implementation.
+
+Animation velocity feed-forward reduces tracking lag. Held animation keeps physics
+and recovery active; simulation pause freezes them. Seek/loop discontinuities reset
+target velocity without overwriting actual body poses. Mode changes clear velocities,
+disable drives outside Follow, and preserve the current release pose; Kinematic snaps
+to animation. Reset restores the scene and time while preserving mode and gains.
+
+Tests cover held and moving position/orientation targets, wall obstruction and recovery,
+two-way dynamic contact, stiffness/damping response, grabbing, mode changes, transformed
+multiple characters, omitted bones, repeatable restart and full-character walking.
+RTX smoke coverage exercises Follow skinning, animation pause, seeking and reset.
 
 ### 4. Evaluate coupled interaction
 

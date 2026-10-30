@@ -3,6 +3,7 @@
 #include "Fbik.h"
 #include "AnimationPlayer.h"
 #include "Skinning.h"
+#include "SkeletonPose.h"
 #include "StageCamera.h"
 #include <algorithm>
 #include <array>
@@ -116,6 +117,7 @@ struct Scene
     bool skinDirty = false, physicsPoseDirty = false;
     std::vector<fbik::Pose> skinPoses;
     fbik::InitResult characterStats;
+    fbik::FollowSettings followSettings;
     std::vector<fbik::Pose> referencePoses;
     bool showBones = false, animationPlaying = false, animationLoop = false;
     double animationTime = 0, animationStart = 0, animationEnd = 0;
@@ -166,15 +168,29 @@ struct Scene
         attribute.string = lit(name);
         stageWait(stage, ovstage_write_attribute(stage, query, attribute, ordinal, payload, OVSTAGE_PRIM_MODE_UPSERT));
     }
-    void sample(double seconds)
+    void sample(double seconds, bool discontinuity = false)
     {
+        const bool follow=characterPhysics.mode()==fbik::Mode::Follow;
+        const auto heldTargets=follow && !physics
+            ? characterPhysics.updateTargets(characterPhysics.readPoses(referencePoses,ordinal))
+            : std::vector<fbik::BodyTarget>{};
         const auto poses = animation.sample(ordinal, seconds);
         referencePoses=poses;
-        const auto targets = characterPhysics.updateTargets(poses);
-        if (physics)
-            physics->setKinematicTargets(targets, ordinal);
+        auto targets = characterPhysics.updateTargets(poses);
+        if (physics) {
+            if (follow) physics->setFollowTargets(targets,discontinuity);
+            else physics->setKinematicTargets(targets, ordinal);
+        }
         else if (!targets.empty())
         {
+            if (follow) {
+                // Before physics exists, preserve world poses under newly sampled
+                // character transforms. Starting Follow will use these held poses.
+                for(size_t i=0;i<targets.size();++i) {
+                    const auto parent=skeleton::unpacked(targets[i].world)*skeleton::inverse(skeleton::unpacked(targets[i].local));
+                    targets[i].local=skeleton::packed(skeleton::inverse(parent)*skeleton::unpacked(heldTargets[i].world));
+                }
+            }
             std::vector<fbik::Matrix4> local;
             if (!previewTargetsReady) {
                 std::vector<std::string> paths;
@@ -187,7 +203,8 @@ struct Scene
             seal();
             viewer::stage::hierarchy(stage, ordinal);
         }
-        displayPose(poses);
+        if (follow) physicsPoseDirty=true;
+        else displayPose(poses);
         animationTime = seconds;
     }
     void displayPose(const std::vector<fbik::Pose> &poses)
@@ -513,7 +530,7 @@ void RtxView::load(const std::string &path, int width, int height)
              "points", "skel:skeleton", "skel:animationSource", "skel:joints", "primvars:skel:geomBindTransform",
              "primvars:skel:jointIndices", "primvars:skel:jointWeights", "primvars:skel:jointIndices:indices",
              "primvars:skel:jointWeights:indices", "primvars:skel:skinningMethod", "skel:blendShapeTargets",
-             "fbik:joint", "fbik:skeleton", "fbik:swingLimit", "fbik:quasiStatic"}) properties.push_back(lit(name));
+             "fbik:joint", "fbik:skeleton", "fbik:swingLimit", "fbik:quasiStatic", "fbik:followBody"}) properties.push_back(lit(name));
     const ovx_string_t primMetadata[] = {lit("instanceable")};
     const ovx_string_t propertyMetadata[] = {lit("interpolation"), lit("bindMaterialAs"), lit("elementSize")};
     ovstage_population_selector_t selector{};
@@ -737,7 +754,7 @@ void RtxView::render(const Camera &camera, int width, int height)
 
 void RtxView::startAnimation()
 {
-    if (!simulating() || !boneColliderCount() || animating() || characterMode()!=fbik::Mode::Follow) return;
+    if (!simulating() || !boneColliderCount() || animating() || !fbik::usesAnimation(characterMode())) return;
     impl->scene->animationPlaying=true;
 }
 void RtxView::stopAnimation()
@@ -753,16 +770,16 @@ void RtxView::seekAnimation(double seconds)
 {
     if (!std::isfinite(seconds)) throw std::runtime_error("Invalid animation time.");
     if (!impl->scene) return;
-    if (characterMode()!=fbik::Mode::Follow) return;
+    if (!fbik::usesAnimation(characterMode())) return;
     // Finish older ticks before authoring a scrubbed target that has not been simulated yet.
     if (impl->scene->physics) impl->scene->physics->publish(impl->scene->ordinal);
-    impl->scene->sample(std::clamp(seconds, animationStart(), animationEnd()));
+    impl->scene->sample(std::clamp(seconds, animationStart(), animationEnd()),true);
     impl->lastLens = {};
 }
 void RtxView::setAnimationLoop(bool loop) { if (impl->scene) impl->scene->animationLoop = loop; }
 fbik::Mode RtxView::characterMode() const
 {
-    return impl->scene ? impl->scene->characterPhysics.mode() : fbik::Mode::Follow;
+    return impl->scene ? impl->scene->characterPhysics.mode() : fbik::Mode::Kinematic;
 }
 void RtxView::setCharacterMode(fbik::Mode mode)
 {
@@ -772,12 +789,27 @@ void RtxView::setCharacterMode(fbik::Mode mode)
     if (s.physics) s.physics->publish(s.ordinal);
     s.characterPhysics.setMode(mode,s.ordinal);
     if (s.physics) s.physics->applyControlChanges(s.ordinal);
-    if (mode!=fbik::Mode::Follow) {
-        s.animationPlaying=false;
+    if (mode!=fbik::Mode::Kinematic) {
+        if (!fbik::usesAnimation(mode)) s.animationPlaying=false;
+        if (mode==fbik::Mode::Follow && s.physics)
+            s.physics->setFollowTargets(s.characterPhysics.updateTargets(s.referencePoses),true);
         s.displayPose(s.characterPhysics.readPoses(s.referencePoses,s.ordinal));
     }
     else s.sample(s.animationTime);
     impl->lastLens={};
+}
+fbik::FollowSettings RtxView::followSettings() const
+{
+    return impl->scene ? impl->scene->followSettings : fbik::FollowSettings{};
+}
+void RtxView::setFollowSettings(const fbik::FollowSettings &settings)
+{
+    if (!std::isfinite(settings.stiffness) || settings.stiffness<0 ||
+        !std::isfinite(settings.damping) || settings.damping<0)
+        throw std::runtime_error("Follow stiffness and damping must be finite and nonnegative.");
+    if (!impl->scene) return;
+    if (impl->scene->physics) impl->scene->physics->setFollowSettings(settings);
+    impl->scene->followSettings=settings;
 }
 size_t RtxView::boneJointCount() const { return impl->scene ? impl->scene->characterStats.joints : 0; }
 size_t RtxView::characterJointCount() const
@@ -790,8 +822,12 @@ float RtxView::characterRadius() const { if (impl->scene) impl->scene->updatePos
 
 void RtxView::startSimulation()
 {
-    if (loaded() && !simulating())
+    if (loaded() && !simulating()) {
         impl->scene->physics = std::make_unique<PhysicsSimulation>(impl->scene->stage, impl->scene->ordinal);
+        impl->scene->physics->setFollowSettings(impl->scene->followSettings);
+        if (characterMode()==fbik::Mode::Follow)
+            impl->scene->physics->setFollowTargets(impl->scene->characterPhysics.updateTargets(impl->scene->referencePoses),true);
+    }
 }
 void RtxView::stopSimulation()
 {
@@ -803,7 +839,7 @@ void RtxView::stopSimulation()
         impl->scene->physics.reset();
     }
     impl->scene->animationPlaying = false;
-    impl->scene->characterPhysics.setMode(fbik::Mode::Follow,impl->scene->ordinal);
+    impl->scene->characterPhysics.setMode(fbik::Mode::Kinematic,impl->scene->ordinal);
     impl->scene->sample(impl->scene->animationStart);
     impl->scene->characterPhysics.setMode(mode,impl->scene->ordinal);
     impl->lastLens = {}; // Removing the temporary joint layer can refresh viewer attributes.
@@ -812,22 +848,25 @@ void RtxView::stepSimulation()
 {
     if (!simulating()) return;
     auto &s=*impl->scene;
-    if (s.animationPlaying && characterMode()==fbik::Mode::Follow) {
+    if (s.animationPlaying && fbik::usesAnimation(characterMode())) {
         double time = s.animationTime + PhysicsSimulation::timeStep;
+        bool wrapped=false;
         if (s.animationEnd > s.animationStart && time > s.animationEnd)
         {
-            if (s.animationLoop)
+            if (s.animationLoop) {
                 time = s.animationStart + std::fmod(time - s.animationStart, s.animationEnd - s.animationStart);
+                wrapped=true;
+            }
             else
             {
                 time = s.animationEnd;
                 s.animationPlaying = false;
             }
         }
-        s.sample(time);
+        s.sample(time,wrapped);
     }
     s.physics->step(s.ordinal, false);
-    if (characterMode()!=fbik::Mode::Follow) s.physicsPoseDirty = true;
+    if (characterMode()!=fbik::Mode::Kinematic) s.physicsPoseDirty = true;
 }
 bool RtxView::simulating() const
 {
@@ -861,7 +900,7 @@ bool RtxView::beginDrag(const Camera::Ray &ray)
     if (!picked && starting) s.physics.reset();
     // Adding the mouse-joint layer can repopulate authored (unskinned) mesh points.
     if (picked && !s.characterPhysics.characters().empty()) {
-        if (characterMode()!=fbik::Mode::Follow)
+        if (characterMode()!=fbik::Mode::Kinematic)
             s.displayPose(s.characterPhysics.readPoses(s.referencePoses,s.ordinal));
         else
             s.displayPose(s.referencePoses);

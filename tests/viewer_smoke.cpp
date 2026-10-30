@@ -25,8 +25,10 @@ int main(int argc, char **argv)
     try
     {
         std::cout << std::unitbuf;
-        require(argc == 2, "Expected project root");
+        require(argc == 2 || (argc == 3 && std::string(argv[2]) == "--two-characters"),
+                "Expected project root [--two-characters]");
         const auto root = std::filesystem::absolute(argv[1]);
+        const bool twoCharacters = argc == 3;
         require(glfwInit() != 0, "GLFW initialization failed");
         glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
         glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
@@ -80,7 +82,8 @@ int main(int argc, char **argv)
             rtx.render(camera, 800, 450);
             rtx.load(file, 640, 480);
             rtx.render(camera, 640, 480);
-            rtx.load((root / "resources/scenes/basic_walk.usda").u8string(), 640, 480);
+            rtx.load((root / (twoCharacters ? "resources/scenes/two_characters.usda"
+                                           : "resources/scenes/basic_walk.usda")).u8string(), 640, 480);
             require(rtx.characterJointCount() > 0 && rtx.characterRadius() > 0,
                     "Character framing data is missing");
             require(rtx.collisionExclusions().size()>=22,
@@ -101,7 +104,7 @@ int main(int argc, char **argv)
                     (rtx.characterCenter() - initialCharacter).magnitude() < 1e-4,
                     "Reset did not restore a scrubbed character without physics");
             rtx.showBoneColliders(false);
-            require(rtx.initialCamera() != nullptr, "Basic walk camera is missing");
+            require(rtx.initialCamera() != nullptr, "Walk scene camera is missing");
             camera = *rtx.initialCamera();
             viewer::Vec3 boxPixel{0, 0, 0};
             const auto boxHeightInImage = [&] {
@@ -224,7 +227,8 @@ int main(int argc, char **argv)
             rtx.seekAnimation(.5);
             const auto releaseCenter=rtx.characterCenter();
             rtx.setCharacterMode(fbik::Mode::Ragdoll);
-            require(!rtx.simulating() && rtx.boneJointCount()==22,"Selecting ragdoll started simulation or lost joints");
+            require(!rtx.simulating() && rtx.boneJointCount()==(twoCharacters ? 44 : 22),
+                    "Selecting ragdoll started simulation or lost joints");
             require((rtx.characterCenter()-releaseCenter).magnitude()<.001,"Selecting ragdoll changed the held pose");
             rtx.startSimulation();
             rtx.startAnimation();
@@ -242,8 +246,8 @@ int main(int argc, char **argv)
             rtx.showBoneColliders(true);
             rtx.render(camera,640,480);
             require((rtx.characterCenter()-heldCenter).magnitude()<.001,"Rendering moved the paused ragdoll");
-            rtx.setCharacterMode(fbik::Mode::Follow);
-            require((rtx.characterCenter()-releaseCenter).magnitude()<.001,"Follow did not restore the held animation pose");
+            rtx.setCharacterMode(fbik::Mode::Kinematic);
+            require((rtx.characterCenter()-releaseCenter).magnitude()<.001,"Kinematic did not restore the held animation pose");
             rtx.stepSimulation();
             rtx.seekAnimation(.75); // Release a paused target that has not had a physics step yet.
             const auto scrubbedCenter=rtx.characterCenter();
@@ -254,7 +258,7 @@ int main(int argc, char **argv)
             require(rtx.characterMode()==fbik::Mode::Ragdoll && std::abs(rtx.animationTime())<1e-6 &&
                     (rtx.characterCenter()-initialCharacter).magnitude()<.001,"Reset did not restore the ragdoll start pose");
             rtx.startSimulation();rtx.stepSimulation();
-            rtx.setCharacterMode(fbik::Mode::Follow);
+            rtx.setCharacterMode(fbik::Mode::Kinematic);
             rtx.stopSimulation();rtx.showBoneColliders(false);
             std::cout << "Ragdoll playback, paused transitions, rendering and reset passed.\n" << std::flush;
             rtx.setCharacterMode(fbik::Mode::QuasiStatic);
@@ -267,9 +271,49 @@ int main(int argc, char **argv)
             rtx.stopSimulation();
             require(rtx.characterMode()==fbik::Mode::QuasiStatic &&
                     (rtx.characterCenter()-initialCharacter).magnitude()<.001,"Reset lost quasi static mode or the start pose");
-            rtx.startSimulation();rtx.stepSimulation();rtx.setCharacterMode(fbik::Mode::Follow);
+            rtx.startSimulation();rtx.stepSimulation();rtx.setCharacterMode(fbik::Mode::Kinematic);
             rtx.stopSimulation();
             std::cout << "Quasi static playback, rendering and reset passed.\n" << std::flush;
+            rtx.setCharacterMode(fbik::Mode::Follow);
+            require(!rtx.simulating(),"Selecting Follow started simulation");
+            const auto followInitial=rtx.characterCenter();
+            rtx.seekAnimation(.5);
+            require(!rtx.simulating() && (rtx.characterCenter()-followInitial).magnitude()<.001,
+                    "Seeking Follow before simulation moved the held pose");
+            rtx.seekAnimation(0);
+            rtx.setFollowSettings({400,40});
+            rtx.startSimulation();
+            for(int i=0;i<30;++i) rtx.stepSimulation();
+            rtx.render(camera,640,480);
+            const auto followBefore=rtx.pixels();
+            rtx.startAnimation();
+            for(int i=0;i<60;++i) rtx.stepSimulation();
+            require(rtx.animating() && std::abs(rtx.animationTime()-1)<1e-6,"Follow did not advance animation");
+            rtx.render(camera,640,480);saveFrame("follow-walk.ppm");
+            size_t followChanged=0;
+            for(size_t i=0;i<followBefore.size();++i)
+                if(std::abs(int(followBefore[i])-int(rtx.pixels()[i]))>20) ++followChanged;
+            require(followChanged>500,"Follow did not animate the rendered skin");
+            rtx.stopAnimation();
+            for(int i=0;i<60;++i) rtx.stepSimulation();
+            require(std::abs(rtx.animationTime()-1)<1e-6 && rtx.simulating(),"Held Follow pose advanced animation or stopped physics");
+            const auto followHeld=rtx.characterCenter();
+            rtx.seekAnimation(3);
+            require((rtx.characterCenter()-followHeld).magnitude()<.001,"Seeking Follow teleported the displayed body");
+            for(int i=0;i<90;++i) rtx.stepSimulation();
+            require((rtx.characterCenter()-followHeld).magnitude()>.2,"Follow did not approach the scrubbed target");
+            const auto followPaused=rtx.characterCenter();
+            rtx.render(camera,640,480);rtx.render(camera,640,480);
+            require((rtx.characterCenter()-followPaused).magnitude()<.001,"Rendering advanced Follow physics");
+            rtx.setCharacterMode(fbik::Mode::Ragdoll);
+            require((rtx.characterCenter()-followPaused).magnitude()<.001,"Follow-to-ragdoll snapped the pose");
+            rtx.setCharacterMode(fbik::Mode::Follow);
+            rtx.stopSimulation();
+            require(rtx.characterMode()==fbik::Mode::Follow && std::abs(rtx.animationTime())<1e-6 &&
+                    (rtx.characterCenter()-initialCharacter).magnitude()<.001,"Follow reset lost mode, pose or time");
+            rtx.startSimulation();rtx.stepSimulation();
+            rtx.setCharacterMode(fbik::Mode::Kinematic);rtx.stopSimulation();
+            std::cout << "Follow animation, skinning, held targets, seeking, mode transitions and restart passed.\n";
             std::cout << "Restarting simulation before scene replacement.\n";
             rtx.startSimulation();
             std::cout << "Stepping before scene replacement.\n";
@@ -281,7 +325,7 @@ int main(int argc, char **argv)
             require(!rtx.dragging(), "Scene replacement retained drag state");
             require(!rtx.simulating(), "Loading a new stage retained the old simulation");
             require(rtx.characterJointCount() == 0 && rtx.boneColliderCount() == 0,
-                    "Falling box retained a character after replacing Basic walk");
+                    "Falling box retained a character after replacing the walk scene");
             rtx.render(camera, 640, 480);
             rtx.load((root / "tests/data/capsules.usda").u8string(), 640, 480);
             require(rtx.boneColliderCount()==3,

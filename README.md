@@ -145,7 +145,7 @@ joints. Joints are disabled in Follow and enabled in Ragdoll and Quasi static. A
 generated bone colliders (including across characters); environment contacts remain
 active. Shift-drag works on dynamic bone bodies as well as scene objects.
 
-`fbik::Module::init(stage, ordinal, minSkinWeight)` still builds the generated layer.
+`fbik::Module::init(stage, ordinal, minSkinWeight, boneShape)` builds the generated layer.
 `setMode(mode, ordinal)` publishes a dedicated control ordinal that the physics wrapper
 consumes through `applyControlChanges`. `updateTargets(poses)` supplies Follow targets.
 After a dynamic step, `readPoses(referencePoses, ordinal)` returns the existing `Pose`
@@ -205,6 +205,10 @@ kinematic and unconstrained. Animation drives are not implemented yet.
 ## Character colliders
 
 On load, `fbik::Module::init` discovers skeletons under USD `SkelRoot` prims.
+Choose **Convex** (default) or **Capsule** in the **Bone shape** dropdown before
+loading or reloading a scene. The selection applies only during scene initialization.
+The dropdown is locked while a physics session exists, including paused playback;
+pause and **Reset** to unlock it, then **Reload** to apply a new selection.
 Hands and heads each become one body including all descendant skin. Detection is
 case-insensitive and examines only the final component of each joint path. A name
 containing `hand` or `wrist` identifies a hand, and a name containing `head` identifies
@@ -213,7 +217,7 @@ parent containing `arm` is treated as the hand. Named hands beyond helper bones 
 precedence over this fallback. The outermost detected root absorbs its whole subtree;
 descendants receive no separate bodies or physics joints.
 
-For each retained non-leaf joint it fits an oriented box to vertices with skin weights
+For each retained non-leaf joint, **Convex** fits an oriented box to vertices with skin weights
 strictly above **0.3**, combining bound meshes in the initial evaluated pose. For a hand
 or head, qualifying influences on any descendant select vertices for that root's hull.
 Each mesh vertex is included only once per body even when several influences map to it.
@@ -223,7 +227,18 @@ The resulting polygon mesh uses `PhysicsMeshCollisionAPI` with `convexHull`
 approximation, so PhysX cooks a convex mesh body shape. A 0.5 mm support allowance
 and minimum 1 mm OBB thickness keep sparse or flat input sets usable.
 The threshold is an optional `Module::init` parameter. Full skin weights still
-determine each vertex position; the threshold only selects hull vertices.
+determine each vertex position; the threshold only selects fitting vertices.
+
+**Capsule** uses the same selected skin points, projected into a frame with X along
+the bone, Y from `Vec3::perp()`, and Z from X cross Y. The capsule is centered at
+the projected bounds' midpoint. Its radius is half the smaller Y/Z span, and its
+cylinder length is `max(0, spanX - 2 * radius)`. A zero-length cylinder is a sphere;
+the minimum diameter is 1 mm in world space. Bone direction points toward the average
+immediate child position. Terminal hands/heads and coincident joints use an incoming
+ancestor direction, falling back to the bone's X axis. Capsules are native USD/PhysX
+primitives, with matching bounds for rendering. The `boneShape` parameter accepts
+`fbik::BoneShape::Convex` or `fbik::BoneShape::Capsule` and defaults to convex.
+
 Without qualifying vertices it creates a capsule from the joint to the average
 position of its immediate children, with radius 10% of that distance. Zero-length
 segments are skipped. Leaf joints receive no collider, except a detected hand, wrist,
@@ -232,7 +247,7 @@ or head with qualifying skin vertices. The complete source skeleton stays intact
 Generated geometry lives under each character's `__FbikBoneColliders` Xform in
 an in-memory layer. It has kinematic rigid-body and collision APIs and becomes part of the
 shared simulation on Start simulation. Use **Show bone colliders** to inspect the shapes.
-SOMA produces 23 convex meshes, absorbs 52 hand/head descendants, and omits two
+SOMA produces 23 convex meshes or capsules, absorbs 52 hand/head descendants, and omits two
 remaining leaf joints. Reinitializing replaces the
 module's generated layer. Source USD files are never changed.
 
@@ -260,7 +275,8 @@ and the ImGui/OpenGL backend. Movie recorder tests exercise MP4 output and encod
 The CPU physics test verifies gravity, ground contact, child transforms, exact
 reset, repeatable trajectories, ray picking, dragging, collision resistance, and release. The small
 cube under `tests/data` is a test fixture, not a startup demo. The FBIK test covers
-multiple characters and skeletons, skin bindings, fallback capsules, leaf omission,
+multiple characters and skeletons, skin bindings, fitted and fallback capsules,
+rotated/scaled capsule bounds, zero-length spheres, sparse inputs, shape switching, leaf omission,
 hand/head subtree aggregation, helper-aware name detection, preserved descendant angles,
 Y/Z-up character frames, bent and straight hinge calibration, signed limits, circular
 swing versus pyramidal bounds, actual ragdoll angular limits, and reset repeatability,

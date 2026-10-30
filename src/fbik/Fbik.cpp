@@ -45,6 +45,20 @@ void pose(std::ostream &out, const Vec3 &p, const Quat &q)
     out << "double3 xformOp:translate = "; vector(out, p);
     out << "\nquatf xformOp:orient = (" << q.w << ',' << q.x << ',' << q.y << ',' << q.z << ")\n";
 }
+Vec3 boneDirection(const Skeleton &sk, size_t joint, float epsilon)
+{
+    const auto bone=sk.toCharacter*sk.jointPose[joint];
+    Vec3 direction(Zero);
+    for (int child:sk.children[joint])
+        direction+=sk.toCharacter.transform(sk.jointPose[child].b)-bone.b;
+    if (!sk.children[joint].empty()) direction/=float(sk.children[joint].size());
+    // Terminal hands/heads and coincident joints still need a frame for their skin.
+    for (int p=sk.parents[joint];direction.magnitudeSquared()<epsilon*epsilon && p>=0;p=sk.parents[p])
+        direction=bone.b-sk.toCharacter.transform(sk.jointPose[p].b);
+    if (direction.magnitudeSquared()<epsilon*epsilon) direction=bone.A.column0;
+    if (direction.magnitudeSquared()<epsilon*epsilon) direction=Vec3(1,0,0);
+    return direction.normalized();
+}
 struct CollisionTopology
 {
     std::vector<size_t> owners;
@@ -195,9 +209,10 @@ struct Module::Impl
 };
 Module::Module() : impl(std::make_unique<Impl>()) {}
 Module::~Module() = default;
-InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, float minSkinWeight)
+InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, float minSkinWeight, BoneShape boneShape)
 {
     require(std::isfinite(minSkinWeight) && minSkinWeight >= 0 && minSkinWeight <= 1, "Minimum skin weight must be between zero and one.");
+    require(boneShape==BoneShape::Convex || boneShape==BoneShape::Capsule, "Unknown bone shape.");
     require(scene != nullptr, "init needs a populated stage.");
     require(!impl->stage || impl->stage==scene, "Use one module per stage.");
     impl->stage=scene;
@@ -288,7 +303,7 @@ InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, f
                 // A named terminal hand/head can still have enough skin for a hull.
                 if (sk.children[j].empty() && (!topology.collapsedRoots[j] || sk.points[j].empty()))
                 { ++result.leaves; continue; }
-                const bool mesh=!sk.points[j].empty();
+                const bool mesh=boneShape==BoneShape::Convex && !sk.points[j].empty();
                 ConvexShape hull;
                 Vec3 center(Zero),size(Zero); Quat rotation(Identity); float length=0, radius=0;
                 if (mesh)
@@ -303,6 +318,20 @@ InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, f
                     require(!hull.empty() && hull.volume()>0,"Cannot create convex bone mesh.");
                     ++result.convexMeshes;
                 }
+                else if (!sk.points[j].empty())
+                {
+                    const auto origin=sk.toCharacter.transform(sk.jointPose[j].b);
+                    const Vec3 x=boneDirection(sk,j,minSize*0.001f),y=x.perp();
+                    const Mat33 frame(x,y,x.cross(y));
+                    const auto toLocal=frame.getTranspose();
+                    Bounds3 bounds(Empty);
+                    for (const auto &point:sk.points[j]) bounds.include(toLocal*(point-origin));
+                    size=bounds.getDimensions();
+                    center=origin+frame*bounds.getCenter(); rotation=Quat(frame);
+                    radius=std::max(std::min(size.y,size.z)*0.5f,minSize*0.5f);
+                    length=std::max(0.0f,size.x-2*radius);
+                    ++result.capsules;
+                }
                 else
                 {
                     const Vec3 a=sk.toCharacter.transform(sk.jointPose[j].b);
@@ -311,9 +340,8 @@ InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, f
                     b/=float(sk.children[j].size());
                     const Vec3 delta=b-a; length=delta.magnitude();
                     if (length<minSize*0.001f) { ++result.degenerate; continue; }
-                    const Vec3 z=delta/length;
-                    Vec3 x=(std::abs(z.y)<0.9f ? Vec3(0,1,0) : Vec3(1,0,0)).cross(z); x.normalize();
-                    rotation=Quat(Mat33(x,z.cross(x),z)); center=(a+b)*0.5f; radius=length*0.1f;
+                    const Vec3 x=delta/length,y=x.perp();
+                    rotation=Quat(Mat33(x,y,x.cross(y))); center=(a+b)*0.5f; radius=length*0.1f;
                     ++result.capsules;
                 }
                 usd << "def " << (mesh ? "Mesh" : "Capsule") << " \"Joint_" << j << "\" (prepend apiSchemas = [\"PhysicsCollisionAPI\", \"PhysicsRigidBodyAPI\", \"PhysxRigidBodyAPI\""
@@ -342,8 +370,13 @@ InitResult Module::init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, f
                     for(size_t k=0;k<hull.indices.size();++k) {if(k) usd << ',';usd << hull.indices[k];}
                     usd << "]\nuniform token[] xformOpOrder = [\"xformOp:translate\",\"xformOp:orient\"]\n";
                 }
-                else usd << "double height = " << length << "\ndouble radius = " << radius
-                         << "\nuniform token axis = \"Z\"\nuniform token[] xformOpOrder = [\"xformOp:translate\",\"xformOp:orient\"]\n";
+                else {
+                    const Vec3 extent(length*0.5f+radius,radius,radius);
+                    usd << "double height = " << length << "\ndouble radius = " << radius
+                        << "\nuniform token axis = \"X\"\nfloat3[] extent = [";
+                    vector(usd,-extent);usd << ',';vector(usd,extent);
+                    usd << "]\nuniform token[] xformOpOrder = [\"xformOp:translate\",\"xformOp:orient\"]\n";
+                }
                 usd << "}\n";
             }
             for (const auto &[j,index] : bodyIndices)

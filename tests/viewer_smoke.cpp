@@ -281,6 +281,24 @@ int main(int argc, char **argv)
             require(rtx.characterJointCount() == 0 && rtx.boneColliderCount() == 0,
                     "Falling box retained a character after replacing Basic walk");
             rtx.render(camera, 640, 480);
+            rtx.load((root / "tests/data/capsules.usda").u8string(), 640, 480, fbik::BoneShape::Capsule);
+            require(rtx.boneColliderCount()==3 && rtx.boneShape()==fbik::BoneShape::Capsule,
+                    "Viewer did not initialize the capsule fixture with the selected shape");
+            camera.init();camera.look_at({25,20,30},{8,8,4});
+            const auto orangePixels=[&] {
+                for (int i=0;i<6;++i) rtx.render(camera,640,480);
+                size_t count=0;const auto &rgba=rtx.pixels();
+                for (size_t i=0;i<rgba.size();i+=4)
+                    count+=rgba[i]>70 && rgba[i]>rgba[i+1]*1.1 && rgba[i+1]>rgba[i+2]*1.3;
+                return count;
+            };
+            const auto hiddenCapsules=orangePixels();
+            rtx.showBoneColliders(true);
+            require(orangePixels()>hiddenCapsules+100,"Show bone colliders did not render the capsules");
+            saveFrame("capsules.ppm");
+            rtx.showBoneColliders(false);
+            require(orangePixels()<hiddenCapsules+50,"Hide bone colliders retained visible capsules");
+            std::cout << "Capsule initialization and RTX visibility passed.\n";
             glViewport(0, 0, 640, 480);
             glClear(GL_COLOR_BUFFER_BIT);
             ImGui_ImplGLFW_NewFrame();

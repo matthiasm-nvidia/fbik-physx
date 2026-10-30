@@ -33,6 +33,7 @@ struct Viewer
     viewer::RtxView *rtx = nullptr;
     bool playing = false, animationPlaying = false, loop = true, follow = false;
     float playbackSpeed = 1;
+    fbik::BoneShape boneShape = fbik::BoneShape::Convex;
 };
 Viewer &state(GLFWwindow *window)
 {
@@ -452,9 +453,25 @@ int wmain(int argc, wchar_t **argv)
             if (ImGui::Combo("##Scene selection", &selectedDemo, demoNames, int(std::size(demoNames))))
                 v.pendingLoad = demoPaths[selectedDemo];
             ImGui::PopItemWidth();
+            if (rtx.loaded() && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", rtx.path().c_str());
+            const bool shapeLocked = rtx.simulating();
+            // This bundled ImGui predates BeginDisabled; a child with NoInputs locks the combo.
+            if (shapeLocked) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.5f);
+            ImGui::PushStyleColor(ImGuiCol_ChildWindowBg, ImVec4(0, 0, 0, 0));
+            ImGui::BeginChild("Bone shape control",
+                ImVec2(0, ImGui::GetTextLineHeight() + 2 * ImGui::GetStyle().FramePadding.y), false,
+                shapeLocked ? ImGuiWindowFlags_NoInputs : 0);
+            int boneShape = static_cast<int>(shapeLocked ? rtx.boneShape() : v.boneShape);
+            ImGui::PushItemWidth(-ImGui::CalcTextSize("Bone shape").x - ImGui::GetStyle().ItemInnerSpacing.x);
+            if (ImGui::Combo("Bone shape", &boneShape, "Convex\0Capsule\0") && !shapeLocked)
+                v.boneShape = static_cast<fbik::BoneShape>(boneShape);
+            ImGui::PopItemWidth();
+            ImGui::EndChild();
+            ImGui::PopStyleColor();
+            if (shapeLocked) ImGui::PopStyleVar();
+            ImGui::TextWrapped(shapeLocked ? "Pause and reset to change" : "Applies on load / reload");
             if (rtx.loaded())
             {
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", rtx.path().c_str());
                 if (ImGui::Button("Reload")) v.pendingLoad = rtx.path();
                 ImGui::Separator();
                 const bool hasCharacter = rtx.characterJointCount() > 0;
@@ -660,7 +677,7 @@ int wmain(int argc, wchar_t **argv)
                         throw std::runtime_error("USD file does not exist: " + requested);
                     stopRecording();
                     rtx.initialize(executableDirectory.u8string());
-                    rtx.load(requested, width, height);
+                    rtx.load(requested, width, height, v.boneShape);
                     renderFailed = false;
                     v.playing = false;
                     v.animationPlaying = false;

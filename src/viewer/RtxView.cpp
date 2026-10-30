@@ -116,6 +116,7 @@ struct Scene
     bool skinDirty = false, physicsPoseDirty = false;
     std::vector<fbik::Pose> skinPoses;
     fbik::InitResult characterStats;
+    fbik::BoneShape boneShape = fbik::BoneShape::Convex;
     std::vector<fbik::Pose> referencePoses;
     bool showBones = false, animationPlaying = false, animationLoop = false;
     double animationTime = 0, animationStart = 0, animationEnd = 0;
@@ -491,7 +492,7 @@ void RtxView::initialize(const std::string &executableDirectory)
     }
 }
 
-void RtxView::load(const std::string &path, int width, int height)
+void RtxView::load(const std::string &path, int width, int height, fbik::BoneShape boneShape)
 {
     if (!impl->initialized)
         throw std::runtime_error("Renderer is not initialized.");
@@ -548,7 +549,8 @@ void RtxView::load(const std::string &path, int width, int height)
                                         candidate->ordinal, candidate->ordinal + 1));
     ++candidate->ordinal;
     candidate->seal();
-    candidate->characterStats = candidate->characterPhysics.init(candidate->stage, candidate->ordinal);
+    candidate->characterStats = candidate->characterPhysics.init(candidate->stage, candidate->ordinal, 0.3f, boneShape);
+    candidate->boneShape = boneShape;
     candidate->skinning.init(candidate->stage,candidate->ordinal,candidate->characterPhysics.characters());
     candidate->animation.init(candidate->stage,candidate->ordinal,candidate->characterPhysics.characters());
     const auto &stats = candidate->characterStats;
@@ -882,6 +884,10 @@ bool RtxView::dragging() const
 size_t RtxView::boneColliderCount() const
 {
     return impl->scene ? impl->scene->characterStats.convexMeshes + impl->scene->characterStats.capsules : 0;
+}
+fbik::BoneShape RtxView::boneShape() const
+{
+    return impl->scene ? impl->scene->boneShape : fbik::BoneShape::Convex;
 }
 bool RtxView::boneCollidersVisible() const { return impl->scene && impl->scene->showBones; }
 void RtxView::showBoneColliders(bool visible)

@@ -2,6 +2,7 @@
 #include "MeshTools/ConvexHull.h"
 #include "JointSetup.h"
 #include <PxShape.h>
+#include <geometry/PxCapsuleGeometry.h>
 #include <map>
 #include "AnimationPlayer.h"
 #include "Skinning.h"
@@ -167,6 +168,59 @@ struct Physics
     ovphysx_handle_t handle=OVPHYSX_INVALID_HANDLE;
     ~Physics() { if(handle) {ovphysx_detach_ovstage(handle);ovphysx_destroy_instance(handle);} }
 };
+void testCapsules(const std::filesystem::path &root)
+{
+    namespace sk=viewer::skeleton;
+    using namespace MeshTools;
+    Scene scene;scene.load(root/"tests/data/capsules.usda");
+    fbik::Module module;
+    const auto stats=module.init(scene.stage,scene.ordinal,0.3f,fbik::BoneShape::Capsule);
+    require(stats.capsules==3 && stats.convexMeshes==0 && stats.joints==1,"Capsule selection changed body topology");
+    const auto state=st::read(scene.stage,scene.ordinal,{"usd-prim-type","axis","radius","height","extent","omni:fabric:worldMatrix"});
+    const std::string bone="/World/Character/__FbikBoneColliders/Skeleton_0/Joint_0";
+    const std::string head="/World/Character/__FbikBoneColliders/Skeleton_0/Joint_1";
+    const std::string sparse="/World/Sparse/__FbikBoneColliders/Skeleton_0/Joint_0";
+    const auto &capsule=state.at(bone),&sphere=state.at(head),&point=state.at(sparse);
+    require(capsule.at("usd-prim-type").token=="Capsule" && capsule.at("axis").token=="X","Capsule was not authored along X");
+    require(std::abs(capsule.at("radius").numbers[0]-1)<1e-5 &&
+            std::abs(capsule.at("height").numbers[0]-6)<1e-5,"Rotated capsule radius or cylinder length is wrong");
+    const auto body=sk::world(capsule),terminal=sk::world(sphere);
+    require((body.b-Vec3(7.6f,7.8f,6)).magnitude()<1e-4,"Capsule did not use the projected bounds center and character transform");
+    require((body.A.column0-Vec3(1.2f,1.6f,0)).magnitude()<1e-4,"Capsule X axis did not follow the bone");
+    require((terminal.b-Vec3(16.2f,10.1f,0)).magnitude()<1e-4 &&
+            (terminal.A.column0-body.A.column0).magnitude()<1e-4,"Terminal head did not use its incoming direction");
+    require(std::abs(sphere.at("radius").numbers[0]-.5)<1e-5 && sphere.at("height").numbers[0]==0,
+            "Short capsule did not reduce to a sphere");
+    require(std::abs(point.at("radius").numbers[0]-.0005)<1e-8 && point.at("height").numbers[0]==0,
+            "Sparse capsule did not retain a positive minimum radius");
+    const std::vector<double> expectedExtent={-4,-1,-1,4,1,1};
+    const auto &extent=capsule.at("extent").numbers;
+    require(extent.size()==expectedExtent.size(),"Missing capsule render bounds");
+    for (size_t i=0;i<extent.size();++i) require(std::abs(extent[i]-expectedExtent[i])<1e-5,"Wrong capsule render bounds");
+    module.showColliders(true,scene.ordinal);
+    {
+        Physics physics;ovphysx_create_args args=OVPHYSX_CREATE_ARGS_DEFAULT;
+        check(ovphysx_create_instance(&args,&physics.handle));check(ovphysx_attach_ovstage(physics.handle,scene.stage,scene.ordinal));
+        check(ovphysx_step_sync(physics.handle,1.0f/60));
+        for (const auto &path:{bone,head,sparse}) {
+            void *shape=nullptr;
+            check(ovphysx_get_physx_ptr(physics.handle,{path.c_str(),path.size()},OVPHYSX_PHYSX_TYPE_SHAPE,&shape));
+            require(shape && static_cast<physx::PxShape*>(shape)->getGeometry().getType()==physx::PxGeometryType::eCAPSULE,
+                    "PhysX did not create a native capsule, including the sphere case");
+            const auto &geometry=static_cast<const physx::PxCapsuleGeometry&>(static_cast<physx::PxShape*>(shape)->getGeometry());
+            const float radius=path==bone ? 2.f : path==head ? 1.f : .0005f;
+            const float halfHeight=path==bone ? 6.f : 0.f;
+            require(std::abs(geometry.radius-radius)<1e-5 && std::abs(geometry.halfHeight-halfHeight)<1e-5,
+                    "PhysX capsule dimensions lost scaling or used full length as halfHeight");
+        }
+    }
+    const auto convex=module.init(scene.stage,scene.ordinal);
+    require(convex.convexMeshes==3 && convex.capsules==0,"Default initialization did not restore convexes");
+    const auto repeat=module.init(scene.stage,scene.ordinal,0.3f,fbik::BoneShape::Capsule);
+    require(repeat.capsules==stats.capsules && repeat.joints==stats.joints && repeat.convexMeshes==0,
+            "Changing shapes on reinitialization retained old colliders");
+    std::cout << "Capsule fitting, bounds, terminal/sparse spheres, native PhysX shapes and reinitialization passed.\n";
+}
 void testAngularLimits(const std::filesystem::path &root)
 {
     namespace sk=viewer::skeleton;
@@ -215,12 +269,12 @@ void testAngularLimits(const std::filesystem::path &root)
     }
     std::cout << "Hinge limits, positive/negative twist, circular swing cones and reset passed.\n";
 }
-void testSomaJointSetup(const std::filesystem::path &root)
+void testSomaJointSetup(const std::filesystem::path &root, fbik::BoneShape boneShape = fbik::BoneShape::Convex)
 {
     namespace sk=viewer::skeleton;
     using namespace MeshTools;
     Scene scene;scene.load(root/"resources/scenes/basic_walk.usda");
-    fbik::Module module;module.init(scene.stage,scene.ordinal);
+    fbik::Module module;module.init(scene.stage,scene.ordinal,0.3f,boneShape);
     const auto &character=module.characters().front();
     const auto pose=viewer::sampleAnimation(scene.stage,scene.ordinal,0,module.characters()).front();
     const auto world=sk::unpacked(pose.characterWorld);
@@ -270,11 +324,14 @@ void testSomaJointSetup(const std::filesystem::path &root)
     require(knees==2 && internal==13 && mobile==5,"SOMA joint classification missed bones");
     std::cout << "SOMA has 13 tightly limited internal joints, five mobile ball joints and two backward-bending knees.\n";
 }
-void testDirectRagdollStart(const std::filesystem::path &root)
+void testDirectRagdollStart(const std::filesystem::path &root, fbik::BoneShape boneShape = fbik::BoneShape::Convex)
 {
     namespace sk=viewer::skeleton;
     Scene scene;scene.load(root/"resources/scenes/basic_walk.usda");
-    fbik::Module module;module.init(scene.stage,scene.ordinal);
+    fbik::Module module;
+    const auto stats=module.init(scene.stage,scene.ordinal,0.3f,boneShape);
+    if (boneShape==fbik::BoneShape::Capsule)
+        require(stats.capsules==23 && stats.convexMeshes==0 && stats.joints==22,"SOMA capsule topology changed");
     const auto reference=viewer::sampleAnimation(scene.stage,scene.ordinal,0,module.characters());
     module.setMode(fbik::Mode::Ragdoll,scene.ordinal);
     std::vector<fbik::Pose> previous;
@@ -618,9 +675,12 @@ int main(int argc,char **argv)
         auto entry=ovstage_config_entry_binary_package_root_path(st::str(binaries.c_str()));
         ovstage_config_t config{&entry,1};st::check(ovstage_initialize(&config));initialized=true;
         viewer::PhysicsRuntime runtime;
+        testCapsules(root);
         testAngularLimits(root);
         testSomaJointSetup(root);
+        testSomaJointSetup(root,fbik::BoneShape::Capsule);
         testDirectRagdollStart(root);
+        testDirectRagdollStart(root,fbik::BoneShape::Capsule);
         testQuasiStatic(root);
         testCollapsedBones(root);
         testRagdoll(root);

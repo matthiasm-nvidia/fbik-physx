@@ -17,6 +17,7 @@ struct InitResult
 };
 
 enum class Mode { Follow, Ragdoll, QuasiStatic };
+enum class BoneShape { Convex, Capsule };
 
 using Matrix4 = std::array<double,16>; // USD row-vector convention; translation in 12..14.
 struct Character { std::string skeletonPath, characterPath; std::vector<std::string> joints; };
@@ -37,10 +38,11 @@ class Module
     ~Module();
     Module(const Module &) = delete;
     Module &operator=(const Module &) = delete;
-    // Starts in Follow mode. Only weights strictly above minSkinWeight contribute to a hull.
+    // Starts in Follow mode. Only weights strictly above minSkinWeight contribute to a shape.
     // Hands/wrists and heads absorb descendant skin and omit descendant physics joints.
     // Joint frames/limits use the rest pose; the physics wrapper applies fbik:swingLimit cones.
-    InitResult init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, float minSkinWeight = 0.3f);
+    InitResult init(ovstage_instance_t *scene, ovstage_ordinal_t &ordinal, float minSkinWeight = 0.3f,
+                    BoneShape boneShape = BoneShape::Convex);
     const std::vector<Character> &characters() const;
     std::vector<BodyTarget> updateTargets(const std::vector<Pose> &poses) const;
     // Authors a sealed control ordinal; the caller must submit it to physics before stepping.
